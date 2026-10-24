@@ -67,6 +67,9 @@ def get_system_status(db: Session = Depends(get_db)) -> Dict[str, Any]:
     emb_provider_name = settings.effective_embedding_provider
     emb_status = "Online" if (settings.has_jina_key or settings.has_hf_token) else "Not Configured"
 
+    # Active Reranker Status (Jina AI)
+    rerank_status = "Online" if settings.has_reranker else "Not Configured"
+
     return {
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "environment": settings.APP_ENV,
@@ -98,6 +101,13 @@ def get_system_status(db: Session = Depends(get_db)) -> Dict[str, Any]:
                 "model": settings.effective_embedding_model,
                 "dimensions": settings.EMBEDDING_DIMENSIONS,
                 "configured": bool(settings.has_jina_key or settings.has_hf_token),
+            },
+            "reranker": {
+                "provider": "Jina AI" if settings.has_jina_key else "Offline / Passthrough",
+                "status": rerank_status,
+                "model": settings.effective_rerank_model,
+                "enabled": settings.RERANK_ENABLED,
+                "configured": settings.has_reranker,
             },
             # Backward-compatibility aliases for frontend telemetry
             "xai_grok": {

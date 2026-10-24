@@ -6,6 +6,9 @@ from app.ai.state import ThreatAnalysisState
 from app.services.retrieval_service import RetrievalService
 from app.models.coverage import DetectionRuleTechnique, DetectionRule
 from app.db.session import SessionLocal
+from app.core.config import get_settings
+
+settings = get_settings()
 
 
 def retrieve_attack_context(state: ThreatAnalysisState) -> Dict[str, Any]:
@@ -37,6 +40,9 @@ def retrieve_attack_context(state: ThreatAnalysisState) -> Dict[str, Any]:
             "candidates_found": len(retrieval_res["candidates"]),
             "highest_confidence": retrieval_res["highest_confidence"],
             "explicit_indicators": retrieval_res["explicit_indicators"],
+            "rerank_applied": retrieval_res.get("rerank_applied", False),
+            "rerank_model": retrieval_res.get("rerank_model"),
+            "rerank_latency_ms": retrieval_res.get("rerank_latency_ms", 0.0),
         },
         "error": None,
     }
@@ -149,6 +155,7 @@ def rank_and_deduplicate_candidates(state: ThreatAnalysisState) -> Dict[str, Any
             "final_candidate_count": len(candidates),
             "covered_candidates": sum(1 for c in coverage_assessments if c["status"] == "covered"),
             "exposed_candidates": sum(1 for c in coverage_assessments if c["status"] == "exposed"),
+            "reranker": settings.effective_rerank_model if settings.has_reranker else "Disabled / Offline",
         },
         "error": None,
     }

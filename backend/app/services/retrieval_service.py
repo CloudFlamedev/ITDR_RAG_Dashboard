@@ -6,6 +6,7 @@ from app.models.attack import AttackTechnique
 from app.models.d3fend import D3fendTechnique, AttackDefenceMapping
 from app.models.rag import RagDocument
 from app.services.vector_store_service import VectorStoreService
+from app.services.rerank_service import RerankService
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +58,15 @@ class RetrievalService:
     - Deduplication, technique-level evidence aggregation, and confidence gating.
     """
 
-    def __init__(self, db: Session, vector_store: Optional[VectorStoreService] = None):
+    def __init__(
+        self,
+        db: Session,
+        vector_store: Optional[VectorStoreService] = None,
+        rerank_service: Optional[RerankService] = None,
+    ):
         self.db = db
-        self.vector_store = vector_store or VectorStoreService(db)
+        self.vector_store = vector_store or (VectorStoreService(db) if db else None)
+        self.rerank_service = rerank_service or RerankService()
 
     def extract_explicit_entities(self, text: str) -> Dict[str, List[str]]:
         """Safely extract explicit MITRE ATT&CK and D3FEND identifiers from user text."""
@@ -89,37 +96,59 @@ class RetrievalService:
         candidates_by_id: Dict[str, CandidateTechnique] = {}
 
         # 1. Exact-ID Lookup Boost
-        for att_id in explicit_attack_ids:
-            tech = self.db.query(AttackTechnique).filter(
-                (AttackTechnique.technique_id == att_id) |
-                (AttackTechnique.technique_id.like(f"{att_id}%"))
-            ).first()
+        if self.db:
+            for att_id in explicit_attack_ids:
+                tech = self.db.query(AttackTechnique).filter(
+                    (AttackTechnique.technique_id == att_id) |
+                    (AttackTechnique.technique_id.like(f"{att_id}%"))
+                ).first()
 
-            if tech:
-                tactics = [t.name for t in tech.tactics]
-                candidates_by_id[tech.technique_id] = CandidateTechnique(
-                    technique_id=tech.technique_id,
-                    name=tech.name,
+                if tech:
+                    tactics = [t.name for t in tech.tactics]
+                    candidates_by_id[tech.technique_id] = CandidateTechnique(
+                        technique_id=tech.technique_id,
+                        name=tech.name,
+                        score=1.0,
+                        is_exact_match=True,
+                        tactics=tactics,
+                        url=tech.url or f"https://attack.mitre.org/techniques/{tech.technique_id}",
+                        description=tech.description or "",
+                        evidence_snippets=[{
+                            "source_id": f"att-tech-{tech.technique_id}",
+                            "title": f"Explicit indicator matched in submitted advisory: {tech.technique_id}",
+                            "excerpt": f"Advisory explicitly mentions {tech.technique_id}. {tech.description[:250]}...",
+                            "score": 1.0,
+                            "url": tech.url,
+                        }]
+                    )
+        else:
+            # Fallback for offline testing or without database session
+            for att_id in explicit_attack_ids:
+                candidates_by_id[att_id] = CandidateTechnique(
+                    technique_id=att_id,
+                    name=f"Technique {att_id}",
                     score=1.0,
                     is_exact_match=True,
-                    tactics=tactics,
-                    url=tech.url or f"https://attack.mitre.org/techniques/{tech.technique_id}",
-                    description=tech.description or "",
+                    tactics=["Initial Access"],
+                    url=f"https://attack.mitre.org/techniques/{att_id}",
+                    description=f"Offline indicator match for {att_id}",
                     evidence_snippets=[{
-                        "source_id": f"att-tech-{tech.technique_id}",
-                        "title": f"Explicit indicator matched in submitted advisory: {tech.technique_id}",
-                        "excerpt": f"Advisory explicitly mentions {tech.technique_id}. {tech.description[:250]}...",
+                        "source_id": f"att-tech-{att_id}",
+                        "title": f"Explicit indicator matched: {att_id}",
+                        "excerpt": f"Advisory explicitly mentions {att_id}.",
                         "score": 1.0,
-                        "url": tech.url,
+                        "url": None,
                     }]
                 )
 
         # 2. Semantic Vector Similarity Search for ATT&CK Techniques & Procedures
-        vector_results = self.vector_store.similarity_search(
-            query=advisory_text,
-            top_k=max_candidates * 3,
-            source_kind="attack",
-        )
+        vector_results = []
+        if self.vector_store and self.db:
+            vector_results = self.vector_store.similarity_search(
+                query=advisory_text,
+                top_k=max_candidates * 3,
+                source_kind="attack",
+            )
 
         for doc, score in vector_results:
             tech_id = doc.external_id
@@ -154,14 +183,16 @@ class RetrievalService:
                     "url": doc.url,
                 })
 
-        # Rank candidates by score descending
-        ranked_candidates = sorted(
-            candidates_by_id.values(),
-            key=lambda c: c.score,
-            reverse=True
-        )[:max_candidates]
+        # 3. Cross-Encoder Reranking
+        # Re-score candidates using Jina AI's multilingual cross-encoder reranker
+        raw_candidates = list(candidates_by_id.values())
+        ranked_candidates, rerank_meta = self.rerank_service.rerank_candidates(
+            query=advisory_text,
+            candidates=raw_candidates,
+            top_n=max_candidates,
+        )
 
-        # 3. Retrieve D3FEND Defensive Knowledge
+        # 4. Retrieve D3FEND Defensive Knowledge
         defensive_countermeasures = []
         if include_d3fend:
             defensive_countermeasures = self._retrieve_d3fend_countermeasures(
@@ -170,7 +201,7 @@ class RetrievalService:
                 explicit_d3fend_ids=explicit_d3fend_ids,
             )
 
-        # 4. Check confidence / sufficiency
+        # 5. Check confidence / sufficiency
         highest_score = ranked_candidates[0].score if ranked_candidates else 0.0
         insufficient_evidence = (highest_score < min_similarity_threshold and not explicit_attack_ids)
 
@@ -182,6 +213,9 @@ class RetrievalService:
             "defensive_countermeasures": defensive_countermeasures,
             "insufficient_evidence": insufficient_evidence,
             "highest_confidence": round(highest_score, 4),
+            "rerank_applied": rerank_meta.get("rerank_performed", False),
+            "rerank_model": rerank_meta.get("rerank_model"),
+            "rerank_latency_ms": rerank_meta.get("duration_ms", 0.0),
         }
 
     def _retrieve_d3fend_countermeasures(
@@ -190,6 +224,9 @@ class RetrievalService:
         candidate_technique_ids: List[str],
         explicit_d3fend_ids: List[str],
     ) -> List[Dict[str, Any]]:
+        if not self.db:
+            return []
+
         countermeasures = []
         seen_d3f_ids = set()
 

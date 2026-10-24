@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     and Hugging Face embedding providers seamlessly.
     """
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", "backend/.env"),
         env_file_encoding="utf-8",
         extra="ignore"
     )
@@ -38,10 +38,13 @@ class Settings(BaseSettings):
     GROQ_API_BASE: str = Field(default="https://api.groq.com/openai/v1", description="Groq API base URL")
     GROQ_MODEL: str = Field(default="openai/gpt-oss-120b", description="Default Groq model")
 
-    # Jina AI Embeddings Configuration
-    JINA_API_KEY: Optional[str] = Field(default=None, description="Jina AI API key for embeddings")
+    # Jina AI Embeddings & Reranker Configuration
+    JINA_API_KEY: Optional[str] = Field(default=None, description="Jina AI API key for embeddings and reranker")
     JINA_API_BASE: str = Field(default="https://api.jina.ai/v1", description="Jina AI API base URL")
     JINA_EMBEDDING_MODEL: str = Field(default="jina-embeddings-v3", description="Jina embedding model")
+    JINA_RERANK_MODEL: str = Field(default="jina-reranker-v2-base-multilingual", description="Jina AI Reranker model")
+    JINA_RERANK_BASE: str = Field(default="https://api.jina.ai/v1/rerank", description="Jina AI Reranker API endpoint")
+    RERANK_ENABLED: bool = Field(default=True, description="Enable cross-encoder reranking before LLM context generation")
 
     # Hugging Face Inference API Configuration
     HF_TOKEN: Optional[str] = Field(default=None, description="Hugging Face API token with inference provider access")
@@ -114,7 +117,18 @@ class Settings(BaseSettings):
     def effective_embedding_model(self) -> str:
         if self.has_jina_key:
             return self.JINA_EMBEDDING_MODEL
-        return self.HF_EMBEDDING_MODEL
+        if self.has_hf_token:
+            return self.HF_EMBEDDING_MODEL
+        return "offline-bge-384"
+
+    @property
+    def has_reranker(self) -> bool:
+        """Returns True if Jina AI reranker is enabled and configured."""
+        return self.RERANK_ENABLED and self.has_jina_key
+
+    @property
+    def effective_rerank_model(self) -> str:
+        return self.JINA_RERANK_MODEL or "jina-reranker-v2-base-multilingual"
 
 
 @lru_cache()

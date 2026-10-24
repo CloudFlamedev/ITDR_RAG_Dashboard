@@ -61,8 +61,8 @@ def get_rag_health(db: Session = Depends(get_db)):
     indexed_count = db.query(RagDocument).count()
 
     return {
-        "embedding_provider": "Hugging Face Inference API",
-        "embedding_model": settings.HF_EMBEDDING_MODEL,
+        "embedding_provider": settings.effective_embedding_provider,
+        "embedding_model": settings.effective_embedding_model,
         "configured_dimensions": settings.EMBEDDING_DIMENSIONS,
         "provider_status": connectivity,
         "storage": {

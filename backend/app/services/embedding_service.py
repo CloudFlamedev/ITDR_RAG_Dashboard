@@ -59,6 +59,31 @@ class EmbeddingService:
                 logger.warning(f"Could not initialize Hugging Face InferenceClient: {e}")
                 self._hf_client = None
 
+    def test_connectivity(self) -> Dict[str, Any]:
+        """Verify connectivity to active embedding provider and return status."""
+        try:
+            vec = self.embed_query("ITDR security test")
+            if vec and len(vec) == self.expected_dim:
+                return {
+                    "status": "connected",
+                    "provider": self.provider,
+                    "model": self.model_name,
+                    "dimension": len(vec),
+                }
+            return {
+                "status": "degraded",
+                "provider": self.provider,
+                "model": self.model_name,
+                "dimension": len(vec) if vec else 0,
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "provider": self.provider,
+                "model": self.model_name,
+                "error": str(e),
+            }
+
     def embed_query(self, text: str) -> List[float]:
         """Generate embedding vector for a single query text (optimized for retrieval query)."""
         if self.provider == "Jina AI" and self.jina_key:
