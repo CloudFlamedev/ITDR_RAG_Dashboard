@@ -13,6 +13,7 @@ class D3fendIngestionService:
     """
     Ingests official MITRE D3FEND ontology JSON knowledge graph into normalized
     relational models and maps authentic offensive-to-defensive relationships.
+    Optimized for batch operations and remote database latency minimization.
     """
 
     def __init__(self, db: Session):
@@ -51,8 +52,8 @@ class D3fendIngestionService:
                     restrictions[item.get("@id")] = (str(prop), str(val))
 
         # 2. Extract defensive techniques (nodes with d3f:d3fend-id)
-        d3f_objects_by_id: Dict[str, D3fendTechnique] = {}
-        candidate_mappings: List[tuple] = []  # (d3f_id, att_technique_id, rel_type, provenance_url)
+        candidate_mappings: List[tuple] = []
+        existing_d3f = {t.d3fend_id: t for t in self.db.query(D3fendTechnique).all()}
 
         for item in graph:
             d3f_id = item.get("d3f:d3fend-id")
@@ -64,7 +65,6 @@ class D3fendIngestionService:
             taxonomy = None
             parent_id = None
 
-            # Determine taxonomy / parent
             sub_classes = item.get("rdfs:subClassOf")
             subs = sub_classes if isinstance(sub_classes, list) else ([sub_classes] if sub_classes else [])
             for sub in subs:
@@ -74,7 +74,6 @@ class D3fendIngestionService:
                         taxonomy = sub_id.replace("d3f:", "")
                         parent_id = taxonomy
 
-                    # Check if this restriction points to an ATT&CK technique
                     if sub_id in restrictions:
                         prop, val = restrictions[sub_id]
                         clean_prop = prop.replace("d3f:", "")
@@ -87,7 +86,6 @@ class D3fendIngestionService:
                                 f"https://d3fend.mitre.org/technique/{d3f_id}"
                             ))
 
-            # Also check direct properties on the item
             for k, v in item.items():
                 if k.startswith("d3f:") and any(term in k for term in ["restricts", "counters", "mitigates", "detects", "isolates", "verifies"]):
                     rel_name = k.replace("d3f:", "")
@@ -105,8 +103,8 @@ class D3fendIngestionService:
 
             url = f"https://d3fend.mitre.org/technique/{d3f_id}"
             
-            d3f_rec = self.db.query(D3fendTechnique).filter_by(d3fend_id=d3f_id).first()
-            if d3f_rec:
+            if d3f_id in existing_d3f:
+                d3f_rec = existing_d3f[d3f_id]
                 d3f_rec.name = name
                 d3f_rec.definition = definition
                 d3f_rec.url = url
@@ -124,40 +122,46 @@ class D3fendIngestionService:
                     raw_metadata=item,
                 )
                 self.db.add(d3f_rec)
+                existing_d3f[d3f_id] = d3f_rec
                 stats["defensive_techniques_created"] += 1
 
-            self.db.flush()
-            d3f_objects_by_id[d3f_id] = d3f_rec
-
         self.db.commit()
 
-        # 3. Insert AttackDefenceMappings where ATT&CK technique exists in the database
-        created_mappings = 0
+        # 3. Batch Insert AttackDefenceMappings
+        att_techniques_by_ext_id = {t.technique_id: t for t in self.db.query(AttackTechnique).all()}
+        existing_map_keys = {
+            (m.attack_technique_external_id, m.d3fend_external_id)
+            for m in self.db.query(AttackDefenceMapping.attack_technique_external_id, AttackDefenceMapping.d3fend_external_id).all()
+        }
+
+        mappings_to_create = []
         for d3f_id, att_ext_id, rel_type, prov_url in set(candidate_mappings):
-            att_tech = self.db.query(AttackTechnique).filter_by(technique_id=att_ext_id).first()
-            if not att_tech or d3f_id not in d3f_objects_by_id:
+            if att_ext_id not in att_techniques_by_ext_id or d3f_id not in existing_d3f:
                 continue
 
-            existing_map = self.db.query(AttackDefenceMapping).filter_by(
+            pair = (att_ext_id, d3f_id)
+            if pair in existing_map_keys:
+                continue
+
+            att_tech = att_techniques_by_ext_id[att_ext_id]
+            d3f_obj = existing_d3f[d3f_id]
+
+            adm = AttackDefenceMapping(
+                attack_technique_id=att_tech.id,
                 attack_technique_external_id=att_ext_id,
-                d3fend_external_id=d3f_id
-            ).first()
+                d3fend_technique_id=d3f_obj.id,
+                d3fend_external_id=d3f_id,
+                relationship_type=rel_type,
+                provenance_url=prov_url,
+                mapping_source="MITRE D3FEND Ontology",
+            )
+            mappings_to_create.append(adm)
+            existing_map_keys.add(pair)
 
-            if not existing_map:
-                adm = AttackDefenceMapping(
-                    attack_technique_id=att_tech.id,
-                    attack_technique_external_id=att_ext_id,
-                    d3fend_technique_id=d3f_objects_by_id[d3f_id].id,
-                    d3fend_external_id=d3f_id,
-                    relationship_type=rel_type,
-                    provenance_url=prov_url,
-                    mapping_source="MITRE D3FEND Ontology",
-                )
-                self.db.add(adm)
-                created_mappings += 1
+        if mappings_to_create:
+            self.db.bulk_save_objects(mappings_to_create)
+            self.db.commit()
 
-        self.db.commit()
-        stats["attack_defence_mappings_created"] = created_mappings
-
+        stats["attack_defence_mappings_created"] = len(mappings_to_create)
         logger.info(f"D3FEND Ingestion complete: {stats}")
         return stats

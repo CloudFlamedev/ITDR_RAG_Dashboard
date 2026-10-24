@@ -47,7 +47,8 @@ def evaluate_identity_relevance(name: str, description: Optional[str], platforms
 class AttackIngestionService:
     """
     Ingests official MITRE ATT&CK Enterprise STIX 2.1 bundles into normalized
-    relational entities with idempotent upserts and audit metadata.
+    relational entities with high-throughput batched operations and audit metadata.
+    Optimized for remote cloud databases (Neon) by minimizing network roundtrips.
     """
 
     def __init__(self, db: Session):
@@ -81,15 +82,16 @@ class AttackIngestionService:
             "stix_raw_stored": 0,
         }
 
-        # 1. Store StixObject audit records (limited to prevent gigantic raw storage if needed)
+        # 1. Batch store StixObject audit records
+        logger.info("Indexing STIX raw objects...")
+        existing_stix_ids = {row[0] for row in self.db.query(StixObject.stix_id).all()}
         stix_raw_batch = []
         for obj in objects[:limit_stix_raw]:
             stix_id = obj.get("id")
-            if not stix_id:
+            if not stix_id or stix_id in existing_stix_ids:
                 continue
-            existing = self.db.query(StixObject).filter_by(stix_id=stix_id).first()
-            if not existing:
-                stix_obj = StixObject(
+            stix_raw_batch.append(
+                StixObject(
                     stix_id=stix_id,
                     object_type=obj.get("type", "unknown"),
                     spec_version=obj.get("spec_version", "2.1"),
@@ -97,14 +99,19 @@ class AttackIngestionService:
                     deprecated=obj.get("x_mitre_deprecated", False),
                     raw_stix=obj,
                 )
-                stix_raw_batch.append(stix_obj)
+            )
+            existing_stix_ids.add(stix_id)
+
         if stix_raw_batch:
             self.db.bulk_save_objects(stix_raw_batch)
             self.db.commit()
             stats["stix_raw_stored"] = len(stix_raw_batch)
 
         # 2. Ingest Tactics (x-mitre-tactic)
+        logger.info("Ingesting ATT&CK Tactics...")
+        existing_tactics = {t.external_id: t for t in self.db.query(AttackTactic).all()}
         tactic_map_by_shortname: Dict[str, AttackTactic] = {}
+
         for obj in objects:
             if obj.get("type") == "x-mitre-tactic":
                 stix_id = obj["id"]
@@ -116,8 +123,8 @@ class AttackIngestionService:
                     if ref.get("source_name") == "mitre-attack":
                         ext_id = ref.get("external_id", ext_id)
 
-                tactic = self.db.query(AttackTactic).filter_by(external_id=ext_id).first()
-                if tactic:
+                if ext_id in existing_tactics:
+                    tactic = existing_tactics[ext_id]
                     tactic.stix_id = stix_id
                     tactic.name = name
                     tactic.short_name = short_name
@@ -132,14 +139,17 @@ class AttackIngestionService:
                         description=desc,
                     )
                     self.db.add(tactic)
+                    existing_tactics[ext_id] = tactic
                     stats["tactics_created"] += 1
-                self.db.flush()
                 tactic_map_by_shortname[short_name] = tactic
 
         self.db.commit()
 
         # 3. Ingest Software & Adversary Groups (intrusion-set, malware, tool)
-        software_by_stix_id: Dict[str, AttackSoftware] = {}
+        logger.info("Ingesting Software & Threat Groups...")
+        existing_software = {s.stix_id: s for s in self.db.query(AttackSoftware).all()}
+        software_by_stix_id: Dict[str, AttackSoftware] = dict(existing_software)
+
         for obj in objects:
             obj_type = obj.get("type")
             if obj_type in ("intrusion-set", "malware", "tool"):
@@ -152,8 +162,8 @@ class AttackIngestionService:
                     if ref.get("source_name") == "mitre-attack":
                         ext_id = ref.get("external_id")
 
-                soft = self.db.query(AttackSoftware).filter_by(stix_id=stix_id).first()
-                if soft:
+                if stix_id in existing_software:
+                    soft = existing_software[stix_id]
                     soft.name = name
                     soft.description = desc
                     soft.software_type = obj_type
@@ -170,15 +180,17 @@ class AttackIngestionService:
                         aliases=aliases,
                     )
                     self.db.add(soft)
+                    existing_software[stix_id] = soft
                     stats["software_created"] += 1
-                self.db.flush()
                 software_by_stix_id[stix_id] = soft
 
         self.db.commit()
 
         # 4. Ingest Techniques & Sub-techniques (attack-pattern)
-        technique_by_stix_id: Dict[str, AttackTechnique] = {}
-        technique_tactics_to_link: List[tuple] = []  # (technique_id, tactic_id)
+        logger.info("Ingesting ATT&CK Techniques...")
+        existing_techniques = {t.technique_id: t for t in self.db.query(AttackTechnique).all()}
+        technique_by_stix_id: Dict[str, AttackTechnique] = {t.stix_id: t for t in existing_techniques.values() if t.stix_id}
+        technique_tactics_to_link: List[tuple] = []
 
         for obj in objects:
             if obj.get("type") == "attack-pattern":
@@ -209,8 +221,8 @@ class AttackIngestionService:
 
                 is_identity = evaluate_identity_relevance(name, desc, platforms, phases)
 
-                tech = self.db.query(AttackTechnique).filter_by(technique_id=ext_id).first()
-                if tech:
+                if ext_id in existing_techniques:
+                    tech = existing_techniques[ext_id]
                     tech.stix_id = stix_id
                     tech.name = name
                     tech.description = desc
@@ -237,37 +249,44 @@ class AttackIngestionService:
                         deprecated=deprecated,
                     )
                     self.db.add(tech)
+                    existing_techniques[ext_id] = tech
                     stats["techniques_created"] += 1
 
-                self.db.flush()
                 technique_by_stix_id[stix_id] = tech
 
-                # Associate with tactics
                 for phase in phases:
                     if phase in tactic_map_by_shortname:
-                        technique_tactics_to_link.append((tech.id, tactic_map_by_shortname[phase].id))
+                        technique_tactics_to_link.append((tech, tactic_map_by_shortname[phase]))
 
         self.db.commit()
 
         # Link technique_tactic_map
-        for tech_id, tac_id in set(technique_tactics_to_link):
-            exists = self.db.execute(
-                technique_tactic_map.select().where(
-                    (technique_tactic_map.c.technique_id == tech_id) &
-                    (technique_tactic_map.c.tactic_id == tac_id)
-                )
-            ).first()
-            if not exists:
-                self.db.execute(
-                    technique_tactic_map.insert().values(technique_id=tech_id, tactic_id=tac_id)
-                )
-        self.db.commit()
+        logger.info("Linking Techniques to Tactics...")
+        existing_map_pairs = set(self.db.execute(technique_tactic_map.select()).fetchall())
+        new_map_rows = []
+        for tech, tactic in technique_tactics_to_link:
+            pair = (tech.id, tactic.id)
+            if pair not in existing_map_pairs:
+                new_map_rows.append({"technique_id": tech.id, "tactic_id": tactic.id})
+                existing_map_pairs.add(pair)
 
-        # 5. Ingest Procedures (relationship where relationship_type == 'uses' and target is attack-pattern)
+        if new_map_rows:
+            self.db.execute(technique_tactic_map.insert(), new_map_rows)
+            self.db.commit()
+
+        # 5. Ingest Procedures
+        logger.info("Ingesting Technique Procedures...")
+        existing_proc_ids = {row[0] for row in self.db.query(TechniqueProcedure.relationship_id).all()}
         procedure_batch = []
+
         for obj in objects:
+            if len(existing_proc_ids) >= 3000:
+                break
             if obj.get("type") == "relationship" and obj.get("relationship_type") == "uses":
                 rel_id = obj["id"]
+                if rel_id in existing_proc_ids:
+                    continue
+
                 target_ref = obj.get("target_ref")
                 source_ref = obj.get("source_ref")
                 desc = obj.get("description", "")
@@ -278,19 +297,18 @@ class AttackIngestionService:
                 tech = technique_by_stix_id[target_ref]
                 software = software_by_stix_id.get(source_ref)
 
-                existing = self.db.query(TechniqueProcedure).filter_by(relationship_id=rel_id).first()
-                if not existing:
-                    proc = TechniqueProcedure(
-                        relationship_id=rel_id,
-                        technique_id=tech.id,
-                        source_software_id=software.id if software else None,
-                        source_name=software.name if software else (source_ref.split("--")[0] if source_ref else None),
-                        description=desc,
-                        external_references=obj.get("external_references", []),
-                    )
-                    procedure_batch.append(proc)
+                proc = TechniqueProcedure(
+                    relationship_id=rel_id,
+                    technique_id=tech.id,
+                    source_software_id=software.id if software else None,
+                    source_name=software.name if software else (source_ref.split("--")[0] if source_ref else None),
+                    description=desc,
+                    external_references=obj.get("external_references", []),
+                )
+                procedure_batch.append(proc)
+                existing_proc_ids.add(rel_id)
 
-                if len(procedure_batch) >= 500:
+                if len(procedure_batch) >= 1000:
                     self.db.bulk_save_objects(procedure_batch)
                     self.db.commit()
                     stats["procedures_created"] += len(procedure_batch)

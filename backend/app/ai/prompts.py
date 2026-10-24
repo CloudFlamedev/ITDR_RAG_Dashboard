@@ -38,12 +38,29 @@ def build_user_prompt(
     extracted_indicators: Dict[str, Any],
 ) -> str:
     """Format prompt with retrieved context, candidates, and coverage state."""
+    # Compact candidates to stay within standard rate limits (e.g. Groq 8k TPM)
+    compact_candidates = []
+    for c in candidate_techniques[:6]:
+        item = dict(c)
+        if "description" in item and isinstance(item["description"], str) and len(item["description"]) > 250:
+            item["description"] = item["description"][:250] + "..."
+        if "evidence_snippets" in item and isinstance(item["evidence_snippets"], list):
+            item["evidence_snippets"] = item["evidence_snippets"][:2]
+        compact_candidates.append(item)
+
+    compact_d3fend = []
+    for d in d3fend_countermeasures[:6]:
+        d_item = dict(d)
+        if "definition" in d_item and isinstance(d_item["definition"], str) and len(d_item["definition"]) > 200:
+            d_item["definition"] = d_item["definition"][:200] + "..."
+        compact_d3fend.append(d_item)
+
     prompt_payload = {
         "user_advisory_text": advisory_text,
         "extracted_indicators": extracted_indicators,
-        "retrieved_attack_candidates": candidate_techniques,
-        "retrieved_d3fend_countermeasures": d3fend_countermeasures,
-        "active_detection_coverage_state": coverage_records,
+        "retrieved_attack_candidates": compact_candidates,
+        "retrieved_d3fend_countermeasures": compact_d3fend,
+        "active_detection_coverage_state": coverage_records[:8],
     }
 
     return f"""Please analyze the following security advisory using ONLY the provided authoritative MITRE ATT&CK, MITRE D3FEND, and internal coverage records.

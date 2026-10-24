@@ -1,6 +1,9 @@
 import time
+import json
 import logging
 import hashlib
+import urllib.request
+import urllib.error
 import numpy as np
 from typing import List, Dict, Any, Optional
 from huggingface_hub import InferenceClient
@@ -12,9 +15,9 @@ settings = get_settings()
 
 class EmbeddingService:
     """
-    Hugging Face Inference API client for text feature extraction / embeddings.
-    Integrates with BAAI/bge-small-en-v1.5 (384 dimensions) with bounded concurrency,
-    batching, retry logic, dimension verification, and resilient offline fallback.
+    Multi-provider embedding service supporting Jina AI Embeddings API,
+    Hugging Face Inference Providers, and deterministic offline fallback.
+    Defaulting to 384 dimensions matching Neon pgvector vector(384).
     """
 
     def __init__(
@@ -24,87 +27,158 @@ class EmbeddingService:
         expected_dim: Optional[int] = None,
         timeout: Optional[int] = None,
     ):
-        self.token = token or settings.HF_TOKEN
-        self.model_name = model_name or settings.HF_EMBEDDING_MODEL
+        self.jina_key = settings.JINA_API_KEY if settings.has_jina_key else None
+        self.hf_token = token or (settings.HF_TOKEN if settings.has_hf_token else None)
         self.expected_dim = expected_dim or settings.EMBEDDING_DIMENSIONS
         self.timeout = timeout or settings.HF_TIMEOUT_SECONDS
-        self.is_configured = bool(self.token and not self.token.startswith("replace-"))
 
-        self._client: Optional[InferenceClient] = None
-        if self.is_configured:
+        if self.jina_key:
+            self.provider = "Jina AI"
+            self.model_name = model_name or settings.JINA_EMBEDDING_MODEL or "jina-embeddings-v5-text-small"
+            self.is_configured = True
+            logger.info(f"Initialized EmbeddingService with Jina AI API (model: {self.model_name}, dim: {self.expected_dim})")
+        elif self.hf_token:
+            self.provider = "Hugging Face"
+            self.model_name = model_name or settings.HF_EMBEDDING_MODEL
+            self.is_configured = True
+            logger.info(f"Initialized EmbeddingService with Hugging Face (model: {self.model_name}, dim: {self.expected_dim})")
+        else:
+            self.provider = "Offline Deterministic"
+            self.model_name = "offline-bge-384"
+            self.is_configured = False
+
+        self._hf_client: Optional[InferenceClient] = None
+        if self.provider == "Hugging Face" and self.hf_token:
             try:
-                self._client = InferenceClient(
+                self._hf_client = InferenceClient(
                     model=self.model_name,
-                    token=self.token,
+                    token=self.hf_token,
                     timeout=self.timeout,
                 )
             except Exception as e:
                 logger.warning(f"Could not initialize Hugging Face InferenceClient: {e}")
-                self._client = None
+                self._hf_client = None
 
     def embed_query(self, text: str) -> List[float]:
-        """Generate embedding vector for a single query text."""
+        """Generate embedding vector for a single query text (optimized for retrieval query)."""
+        if self.provider == "Jina AI" and self.jina_key:
+            vectors = self._embed_jina([text], task="retrieval.query")
+            if vectors:
+                return vectors[0]
+
         vectors = self.embed_documents([text])
         return vectors[0]
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """
-        Batch embed documents with bounded chunk size, exponential retry,
+        Batch embed documents with bounded chunk size, retry logic,
         and dimension verification.
         """
         if not texts:
             return []
 
-        if not self.is_configured or self._client is None:
-            logger.info("Hugging Face API token not configured; using deterministic offline pseudo-embeddings.")
-            return [self._generate_offline_embedding(t) for t in texts]
+        if self.provider == "Jina AI" and self.jina_key:
+            return self._embed_jina(texts, task="retrieval.passage")
 
-        results: List[List[float]] = []
-        batch_size = settings.EMBEDDING_BATCH_SIZE
+        if self.provider == "Hugging Face" and self._hf_client:
+            return self._embed_hf(texts)
 
+        return [self._generate_offline_embedding(t) for t in texts]
+
+    def _embed_jina(self, texts: List[str], task: str = "retrieval.passage", batch_size: int = 64) -> List[List[float]]:
+        """Batch calls to Jina AI Embeddings endpoint (https://api.jina.ai/v1/embeddings)."""
+        all_embeddings: List[List[float]] = []
+
+        for i in range(0, len(texts), batch_size):
+            chunk = texts[i : i + batch_size]
+            payload = {
+                "model": self.model_name,
+                "task": task,
+                "dimensions": self.expected_dim,
+                "input": chunk,
+            }
+
+            req = urllib.request.Request(
+                f"{settings.JINA_API_BASE}/embeddings",
+                headers={
+                    "Authorization": f"Bearer {self.jina_key}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "ITDR-Platform/2.0",
+                },
+                data=json.dumps(payload).encode("utf-8"),
+            )
+
+            retries = 3
+            success = False
+            for attempt in range(1, retries + 1):
+                try:
+                    with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        vectors = [item["embedding"] for item in data["data"]]
+                        
+                        # Verify dimensions
+                        for v in vectors:
+                            if len(v) != self.expected_dim:
+                                raise ValueError(f"Jina dimension mismatch: got {len(v)}, expected {self.expected_dim}")
+                        all_embeddings.extend(vectors)
+                        success = True
+                        break
+
+                except urllib.error.HTTPError as e:
+                    if e.code == 429 and attempt < retries:
+                        time.sleep(1.5 * attempt)
+                        continue
+                    logger.warning(f"Jina AI API call failed ({e}); falling back to offline embeddings for batch.")
+                    break
+                except Exception as e:
+                    logger.warning(f"Jina AI API call failed ({e}); falling back to offline embeddings for batch.")
+                    break
+
+            if not success:
+                all_embeddings.extend([self._generate_offline_embedding(t) for t in chunk])
+
+        return all_embeddings
+
+    def _embed_hf(self, texts: List[str], batch_size: int = 16) -> List[List[float]]:
+        """Batch feature extraction using Hugging Face inference API."""
+        results = []
         for i in range(0, len(texts), batch_size):
             chunk = texts[i : i + batch_size]
             batch_vectors = self._embed_batch_with_retry(chunk)
             results.extend(batch_vectors)
-
         return results
 
     def _embed_batch_with_retry(self, texts: List[str], max_retries: int = 3) -> List[List[float]]:
         delay = 2.0
         for attempt in range(1, max_retries + 1):
             try:
-                # Call feature_extraction endpoint
-                raw_output = self._client.feature_extraction(texts)
-                # raw_output is typically numpy array or list of lists: (batch_size, seq_len, hidden) or (batch_size, hidden)
+                raw_output = self._hf_client.feature_extraction(texts)
                 arr = np.array(raw_output)
 
-                # Mean pooling if token-level embeddings returned: shape (batch, seq, dim)
                 if arr.ndim == 3:
                     arr = np.mean(arr, axis=1)
                 elif arr.ndim == 1:
                     arr = np.expand_dims(arr, axis=0)
 
-                # L2 normalize
                 norms = np.linalg.norm(arr, axis=1, keepdims=True)
                 norms[norms == 0] = 1.0
                 normalized = (arr / norms).tolist()
 
-                # Verify dimensions
                 for vec in normalized:
                     if len(vec) != self.expected_dim:
-                        raise ValueError(
-                            f"Model {self.model_name} output dimension ({len(vec)}) "
-                            f"does not match expected EMBEDDING_DIMENSIONS ({self.expected_dim})."
-                        )
+                        raise ValueError(f"Dimension mismatch: expected {self.expected_dim}, got {len(vec)}")
 
                 return normalized
 
             except Exception as exc:
-                logger.warning(
-                    f"Hugging Face feature extraction attempt {attempt}/{max_retries} failed: {exc}"
-                )
+                exc_str = str(exc)
+                if "402" in exc_str or "Payment Required" in exc_str or "401" in exc_str or "Unauthorized" in exc_str:
+                    logger.warning(f"Hugging Face API quota or credit exhausted ({exc}); switching to offline embeddings.")
+                    self._hf_client = None
+                    return [self._generate_offline_embedding(t) for t in texts]
+
+                logger.warning(f"Hugging Face feature extraction attempt {attempt}/{max_retries} failed: {exc}")
                 if attempt == max_retries:
-                    logger.error("All retries to Hugging Face API failed; falling back to offline embeddings.")
                     return [self._generate_offline_embedding(t) for t in texts]
                 time.sleep(delay)
                 delay *= 2.0
@@ -115,12 +189,10 @@ class EmbeddingService:
         """
         Deterministic, offline, 384-dimensional pseudo-embedding.
         Constructs normalized feature projection using SHA-256 seed hashing.
-        Guarantees identical vectors for identical text without network dependency.
         """
         dim = self.expected_dim
         vec = np.zeros(dim, dtype=np.float32)
 
-        # Tokenize and hash
         words = text.lower().split()
         if not words:
             vec[0] = 1.0
@@ -129,7 +201,7 @@ class EmbeddingService:
         for w in words:
             h = int(hashlib.sha256(w.encode("utf-8")).hexdigest(), 16)
             idx = h % dim
-            sign = 1.0 if (h >> 8) % 2 == 0 else -1.0
+            sign = 1.0 if ((h >> 8) & 1) else -1.0
             vec[idx] += sign
 
         norm = np.linalg.norm(vec)
@@ -138,39 +210,4 @@ class EmbeddingService:
         else:
             vec[0] = 1.0
 
-        return vec.tolist()
-
-    def test_connectivity(self) -> Dict[str, Any]:
-        """Test API connectivity and confirm returned dimension."""
-        start = time.perf_counter()
-        if not self.is_configured:
-            return {
-                "configured": False,
-                "status": "Not Configured",
-                "model": self.model_name,
-                "dimensions": self.expected_dim,
-                "latency_ms": 0.0,
-                "error": "HF_TOKEN not set or using placeholder value",
-            }
-
-        try:
-            sample_vec = self.embed_query("Security Advisory Test")
-            duration = round((time.perf_counter() - start) * 1000, 2)
-            return {
-                "configured": True,
-                "status": "Online",
-                "model": self.model_name,
-                "dimensions": len(sample_vec),
-                "dimension_match": len(sample_vec) == self.expected_dim,
-                "latency_ms": duration,
-                "error": None,
-            }
-        except Exception as e:
-            return {
-                "configured": True,
-                "status": "Degraded / Error",
-                "model": self.model_name,
-                "dimensions": self.expected_dim,
-                "latency_ms": round((time.perf_counter() - start) * 1000, 2),
-                "error": str(e),
-            }
+        return [round(float(x), 6) for x in vec.tolist()]

@@ -17,12 +17,14 @@ from app.core.config import get_settings
 settings = get_settings()
 
 
+from pgvector.sqlalchemy import Vector
+
 class SafeVectorType(TypeDecorator):
     """
-    Resilient vector column type supporting both Neon native pgvector and JSONB fallback.
+    Resilient vector column type supporting native Neon pgvector (vector(384)).
     Serializes Python float arrays consistently and parses database vector outputs.
     """
-    impl = JSONB
+    impl = Vector(settings.EMBEDDING_DIMENSIONS)
     cache_ok = True
 
     def process_bind_param(self, value, dialect):

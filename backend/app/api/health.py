@@ -59,15 +59,13 @@ def get_system_status(db: Session = Depends(get_db)) -> Dict[str, Any]:
         except Exception as e:
             kb_stats["error"] = str(e)
 
-    # Grok xAI Status
-    xai_status = "Online" if settings.has_xai_key else "Not Configured"
-    if settings.has_xai_key and settings.XAI_API_KEY.startswith("replace-"):
-        xai_status = "Not Configured"
+    # Active LLM Status (Groq or xAI)
+    llm_provider_name = "Groq" if settings.is_groq else "xAI Grok"
+    llm_status = "Online" if settings.has_xai_key else "Not Configured"
 
-    # Hugging Face Status
-    hf_status = "Online" if settings.has_hf_token else "Not Configured"
-    if settings.has_hf_token and settings.HF_TOKEN.startswith("replace-"):
-        hf_status = "Not Configured"
+    # Active Embedding Status (Jina AI or Hugging Face)
+    emb_provider_name = settings.effective_embedding_provider
+    emb_status = "Online" if (settings.has_jina_key or settings.has_hf_token) else "Not Configured"
 
     return {
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -87,17 +85,34 @@ def get_system_status(db: Session = Depends(get_db)) -> Dict[str, Any]:
                 "embedding_dimensions": settings.EMBEDDING_DIMENSIONS,
                 "note": "Native pgvector active on Neon" if db_health["pgvector_enabled"] else "Using resilient array fallback; enable extension in Neon via CREATE EXTENSION vector",
             },
+            "llm": {
+                "provider": llm_provider_name,
+                "status": llm_status,
+                "model": settings.effective_llm_model,
+                "base_url": settings.effective_llm_base,
+                "configured": settings.has_xai_key,
+            },
+            "embedding": {
+                "provider": emb_provider_name,
+                "status": emb_status,
+                "model": settings.effective_embedding_model,
+                "dimensions": settings.EMBEDDING_DIMENSIONS,
+                "configured": bool(settings.has_jina_key or settings.has_hf_token),
+            },
+            # Backward-compatibility aliases for frontend telemetry
             "xai_grok": {
-                "status": xai_status,
-                "model": settings.XAI_MODEL,
-                "base_url": settings.XAI_API_BASE,
+                "provider": llm_provider_name,
+                "status": llm_status,
+                "model": settings.effective_llm_model,
+                "base_url": settings.effective_llm_base,
                 "configured": settings.has_xai_key,
             },
             "huggingface": {
-                "status": hf_status,
-                "model": settings.HF_EMBEDDING_MODEL,
+                "provider": emb_provider_name,
+                "status": emb_status,
+                "model": settings.effective_embedding_model,
                 "dimensions": settings.EMBEDDING_DIMENSIONS,
-                "configured": settings.has_hf_token,
+                "configured": bool(settings.has_jina_key or settings.has_hf_token),
             },
             "knowledge_base": kb_stats,
         }

@@ -64,30 +64,75 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
 
     if settings.has_xai_key:
         try:
-            from langchain_xai import ChatXAI
-            llm = ChatXAI(
-                xai_api_key=settings.XAI_API_KEY,
-                xai_api_base=settings.XAI_API_BASE,
-                model=settings.XAI_MODEL,
-                timeout=settings.XAI_TIMEOUT_SECONDS,
-                temperature=0.1,
-            )
-            lc_messages = [
-                SystemMessage(content=messages[0]["content"]),
-                HumanMessage(content=messages[1]["content"]),
-            ]
-            response = llm.invoke(lc_messages)
+            models_to_try = [settings.effective_llm_model]
+            if settings.is_groq:
+                for alt in ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
+                    if alt not in models_to_try:
+                        models_to_try.append(alt)
+
+            last_err = None
+            response = None
+            used_model = settings.effective_llm_model
+
+            for test_model in models_to_try:
+                try:
+                    if settings.is_groq:
+                        from langchain_openai import ChatOpenAI
+                        llm = ChatOpenAI(
+                            api_key=settings.effective_llm_key,
+                            base_url=settings.effective_llm_base,
+                            model=test_model,
+                            timeout=settings.XAI_TIMEOUT_SECONDS,
+                            temperature=0.1,
+                            max_tokens=950,
+                        )
+                    else:
+                        from langchain_xai import ChatXAI
+                        llm = ChatXAI(
+                            xai_api_key=settings.effective_llm_key,
+                            xai_api_base=settings.effective_llm_base,
+                            model=test_model,
+                            timeout=settings.XAI_TIMEOUT_SECONDS,
+                            temperature=0.1,
+                            max_tokens=950,
+                        )
+
+                    lc_messages = [
+                        SystemMessage(content=messages[0]["content"]),
+                        HumanMessage(content=messages[1]["content"]),
+                    ]
+                    response = llm.invoke(lc_messages)
+                    used_model = test_model
+                    model_name = test_model
+                    model_provider = f"Groq LLM ({test_model})" if settings.is_groq else f"xAI Grok ({test_model})"
+                    break
+                except Exception as exc:
+                    last_err = exc
+                    exc_msg = str(exc)
+                    if "model_not_found" in exc_msg or "decommissioned" in exc_msg or "does not exist" in exc_msg or "404" in exc_msg:
+                        logger.warning(f"Model {test_model} not found on {settings.effective_llm_base}, attempting fallback: {exc}")
+                        continue
+                    raise
+
+            if response is None:
+                raise last_err or RuntimeError("No compatible model found on provider API")
+
             raw_response = response.content
 
-            # Parse JSON
-            cleaned = raw_response.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned[7:]
-            if cleaned.startswith("```"):
-                cleaned = cleaned[3:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3]
-            report_dict = json.loads(cleaned.strip())
+            # Parse JSON with json-repair for guaranteed structured object recovery
+            from json_repair import repair_json
+            try:
+                report_dict = repair_json(raw_response, return_objects=True)
+                if not isinstance(report_dict, dict):
+                    raise ValueError("repair_json did not return dict")
+            except Exception:
+                first_brace = raw_response.find("{")
+                last_brace = raw_response.rfind("}")
+                if first_brace != -1 and last_brace != -1:
+                    cleaned = raw_response[first_brace : last_brace + 1]
+                else:
+                    cleaned = raw_response.strip()
+                report_dict = json.loads(cleaned)
 
         except Exception as e:
             logger.warning(f"Grok LLM call failed or timed out ({e}); falling back to grounded synthesis.")
