@@ -9,6 +9,10 @@ export const FilterProvider = ({ children }) => {
   const [clientRestriction, setClientRestriction] = useState('ALL');
   const [itdrScope, setItdrScope] = useState('ITDR Scope Only');
   const [theme, setTheme] = useState(() => localStorage.getItem('itdr_theme') || 'light');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const toggleSidebar = () => setSidebarOpen(prev => !prev);
+  const closeSidebar = () => setSidebarOpen(false);
 
   // Subsystem Telemetry Heartbeat
   const [systemStatus, setSystemStatus] = useState(null);
@@ -69,6 +73,10 @@ export const FilterProvider = ({ children }) => {
         setItdrScope,
         theme,
         toggleTheme,
+        sidebarOpen,
+        setSidebarOpen,
+        toggleSidebar,
+        closeSidebar,
         systemStatus,
         statusLoading,
         refreshStatus: fetchStatus,

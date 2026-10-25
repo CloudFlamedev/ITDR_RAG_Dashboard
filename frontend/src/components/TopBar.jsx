@@ -1,6 +1,6 @@
 import React from 'react';
 import { useFilters } from '../context/FilterContext';
-import { Sun, Moon, Database, Cpu, Sparkles, Layers, Activity } from 'lucide-react';
+import { Sun, Moon, Database, Cpu, Sparkles, Layers, Activity, Menu } from 'lucide-react';
 
 export const TopBar = () => {
   const {
@@ -13,6 +13,7 @@ export const TopBar = () => {
     theme,
     toggleTheme,
     systemStatus,
+    toggleSidebar,
   } = useFilters();
 
   const dbStatus = systemStatus?.subsystems?.database?.status === 'Online';
@@ -24,6 +25,16 @@ export const TopBar = () => {
   return (
     <header className="topbar">
       <div className="topbar-controls">
+        {/* Mobile / Compact Sidebar Toggle Button */}
+        <button
+          className="sidebar-toggle-btn"
+          onClick={toggleSidebar}
+          aria-label="Toggle navigation menu"
+          title="Toggle Navigation Menu"
+        >
+          <Menu size={18} />
+        </button>
+
         {/* View Mode Switcher */}
         <div className="view-segmented-group" title="Pivots across 4 viewports (Persisted in localStorage)">
           {['ClientReq', 'MVP1', 'MVP2', 'MVP3'].map((mode) => (
