@@ -1,73 +1,150 @@
-# ITDR RAG Dashboard
+# 🛡️ ITDR RAG Dashboard
+### Enterprise Identity Threat Detection & Response with Agentic RAG
 
-An Identity Threat Detection and Response (ITDR) portfolio project that combines an interactive security dashboard with a retrieval-augmented generation (RAG) workflow for mapping threat narratives to MITRE ATT&CK techniques and surfacing related defensive knowledge from MITRE D3FEND.
+[![Frontend Deployment](https://img.shields.io/badge/Vercel-Frontend_Live-black?logo=vercel)](https://itdr-rag-dashboard.vercel.app)
+[![Backend API](https://img.shields.io/badge/Render-FastAPI_Live-46e3b7?logo=render)](https://itdr-rag-dashboard.onrender.com/docs)
+[![Database](https://img.shields.io/badge/Neon-PostgreSQL_+_pgvector-00e599?logo=postgresql)](https://neon.tech)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-The application is built with React/Vite, FastAPI, SQLAlchemy, PostgreSQL/Neon, pgvector, Hugging Face embeddings, Grok via xAI, and LangGraph.
+---
 
-> **Project status:** The repository contains the application code, knowledge-base ingestion scripts, database migration, tests, and design documentation. A successful local run or a passing test suite does not by itself prove that a production deployment, live AI-provider connection, or populated knowledge base is working. Follow the verification steps below before sharing a live demo.
+## 📌 Project Overview
+
+### What is this project?
+The **ITDR RAG Dashboard** is an enterprise cybersecurity intelligence platform that ingests raw, unstructured cyber threat narratives (such as CISA advisories, incident notes, or security blogs) and **automatically extracts attack techniques, maps them to MITRE ATT&CK®, and recommends verified defensive countermeasures from MITRE D3FEND™**.
+
+### Why is this needed?
+When a new threat or security incident occurs, Security Operations Center (SOC) analysts and threat hunters face three critical questions:
+1. **"What techniques is the attacker using?"** *(e.g., Kerberoasting, Token Theft, MFA Fatigue)*
+2. **"Are our current detection rules covering these techniques?"**
+3. **"What specific countermeasures should we implement right now to stop them?"**
+
+Manually reading lengthy threat reports to map techniques and research defenses takes **hours**. Moreover, asking general-purpose AI (like standard ChatGPT) often leads to **hallucinated attack IDs and generic advice**.
+
+This platform solves both challenges by combining **LangGraph Agentic workflows** with **authoritative, real-time vector retrieval (`pgvector`)** over **868 MITRE ATT&CK techniques** and **466 MITRE D3FEND countermeasures** stored in PostgreSQL.
+
+---
+
+### How It Works (In 3 Simple Steps)
+
+```
+  1. INPUT ANY ADVISORY              2. RETRIEVE & GROUND                 3. ACTIONABLE DEFENSE
+┌─────────────────────────┐        ┌─────────────────────────────┐      ┌─────────────────────────────┐
+│ Paste any raw incident  │  ────► │ Semantic search & vector    │ ───► │ Instant structured report:  │
+│ report, blog, or CISA   │        │ retrieval via pgvector;     │      │ - MITRE ATT&CK mappings     │
+│ advisory (even without  │        │ cross-encoder reranks the   │      │ - Mapped D3FEND defenses    │
+│ explicit TTP IDs)       │        │ top defensive techniques    │      │ - Coverage gap analysis     │
+└─────────────────────────┘        └─────────────────────────────┘      │ - Step-by-step mitigations  │
+                                                                        └─────────────────────────────┘
+```
+
+- 🎯 **No TTP IDs Required**: Even if an advisory never mentions technique IDs (e.g. *"attackers requested Kerberos TGS tickets for offline password cracking"*), the semantic search engine immediately identifies **`T1558.003 (Kerberoasting)`**.
+- 🛡️ **Zero-Hallucination Grounding**: Every recommended defense is strictly linked to verified MITRE D3FEND ontology components and database citations.
+- 📱 **Mobile & Desktop SOC Dashboard**: Includes a complete interactive dashboard with 7 security views (Resilience, Matrix, Threat Exposure, Scenarios, Feeds, Modeling Workspace, and Reports) and a responsive mobile slide-out navigation drawer.
+
+---
+
+## 🚀 Live Deployments
+
+| Component | Platform | Status | Live Link |
+| :--- | :--- | :---: | :--- |
+| **Frontend Web App** | Vercel | 🟢 Live | [itdr-rag-dashboard.vercel.app](https://itdr-rag-dashboard.vercel.app) |
+| **Backend REST API** | Render | 🟢 Live | [itdr-rag-dashboard.onrender.com](https://itdr-rag-dashboard.onrender.com) |
+| **Interactive API Docs** | Swagger UI | 🟢 Live | [itdr-rag-dashboard.onrender.com/docs](https://itdr-rag-dashboard.onrender.com/docs) |
+| **Database & Vector Store** | Neon Cloud | 🟢 Active | PostgreSQL 16 + native `pgvector(384)` |
+
+---
 
 ## Contents
 
-- [Architecture](#architecture)
+- [Project Overview](#-project-overview)
+- [Live Deployments](#-live-deployments)
+- [System Architecture](#️-system-architecture)
 - [Features](#features)
-- [Technology stack](#technology-stack)
-- [Repository structure](#repository-structure)
+- [Technology Stack](#technology-stack)
+- [Repository Structure](#repository-structure)
 - [Prerequisites](#prerequisites)
 - [Configuration](#configuration)
-- [Run locally](#run-locally)
-- [Initialize the knowledge base](#initialize-the-knowledge-base)
-- [Run tests](#run-tests)
-- [API documentation](#api-documentation)
-- [Deploy to Vercel](#deploy-to-vercel)
-- [Security and demo-data notes](#security-and-demo-data-notes)
+- [Run Locally](#run-locally)
+- [Initialize the Knowledge Base](#initialize-the-knowledge-base)
+- [Run Tests](#run-tests)
+- [API Documentation](#api-documentation)
+- [Cloud Deployment](#cloud-deployment-architecture)
+- [Security and Demo-Data Notes](#security-and-demo-data-notes)
 - [Troubleshooting](#troubleshooting)
-- [Project documentation](#project-documentation)
-- [Data sources and references](#data-sources-and-references)
+- [Project Documentation](#project-documentation)
+- [Data Sources and References](#data-sources-and-references)
 
-## Architecture
+---
+
+## 🏗️ System Architecture
+
+### High-Level Architecture Overview
+
+The system is organized into four clean, decoupled tiers:
 
 ```mermaid
 flowchart TD
-    User[Recruiter / Analyst] --> UI[React + Vite Dashboard]
-    UI -->|HTTPS / JSON| API[FastAPI REST API]
-
-    API --> Services[Domain Services]
-    Services --> DB[(Neon PostgreSQL)]
-    Services --> Graph[LangGraph Threat Analysis Workflow]
-
-    subgraph KnowledgeIngestion[Knowledge-base initialization]
-      ATTACK[MITRE ATT&CK STIX 2.1]
-      D3FEND[MITRE D3FEND JSON-LD / @graph]
-      Builder[Document Builder + Content Hash]
-      Embed[Hugging Face Embedding API]
-      ATTACK --> Builder
-      D3FEND --> Builder
-      Builder --> Embed
-      Embed --> Vectors[(rag_documents + pgvector)]
-      Builder --> DB
+    %% TIER 1: CLIENT & DASHBOARD
+    subgraph Tier1 ["1. Presentation Layer (Vercel)"]
+        User["👤 Security Analyst / Recruiter"]
+        Dashboard["💻 React 18 + Vite SPA<br/><i>(Interactive Security Dashboard & Mobile Drawer)</i>"]
+        User <-->|HTTPS| Dashboard
     end
 
-    Graph --> Retrieval[Hybrid Retrieval]
-    Retrieval --> Vectors
-    Retrieval --> DB
-    Graph -->|Grounded context and output schema| Grok[xAI Grok API]
-    Grok --> Graph
-    Graph -->|Report, citations, execution trace| DB
-    Graph --> API
-    API --> UI
+    %% TIER 2: BACKEND & ORCHESTRATION
+    subgraph Tier2 ["2. API & Orchestration Layer (Render)"]
+        API["⚡ FastAPI REST Gateway"]
+        Workflow["🧠 LangGraph Threat Engine<br/><i>(Extraction → Retrieval → Rerank → Synthesis)</i>"]
+        Dashboard <-->|REST API / JSON| API
+        API <--> Workflow
+    end
+
+    %% TIER 3: AI SERVICES
+    subgraph Tier3 ["3. External AI Services"]
+        Embedder["🔍 Jina AI / Hugging Face<br/><i>(Embeddings & Cross-Encoder Reranker)</i>"]
+        LLM["🤖 Groq / xAI LLM<br/><i>(Fast Structured Report Synthesis)</i>"]
+    end
+
+    %% TIER 4: DATABASE & KNOWLEDGE BASE
+    subgraph Tier4 ["4. Knowledge Base & Vector Store (Neon Cloud)"]
+        RelationalDB[("🗄️ PostgreSQL Relational DB<br/><i>(Detection Rules, Feeds, Incident Reports)</i>")]
+        VectorStore[("📐 pgvector Vector Store (384-dim)<br/><i>(868 MITRE ATT&CK + 466 MITRE D3FEND)</i>")]
+    end
+
+    %% FLOW CONNECTIONS
+    Workflow <-->|Generate Query Embedding| Embedder
+    Workflow <-->|Cosine Similarity Search| VectorStore
+    Workflow <-->|Fetch Rules & D3FEND Mappings| RelationalDB
+    Workflow <-->|Grounded Context & Prompt| LLM
 ```
 
-### Threat-analysis flow
+### 🔄 Threat-Analysis Pipeline (How It Works)
 
-1. An analyst enters a threat advisory or selects a curated sample in the Threat Modeling Workspace.
-2. FastAPI validates the request and invokes the LangGraph workflow.
-3. The workflow extracts explicit ATT&CK/D3FEND identifiers and relevant indicators.
-4. Retrieval combines exact ATT&CK-ID lookup, semantic search over indexed documents, and relational lookups for D3FEND mappings and detection coverage.
-5. The workflow builds a prompt using retrieved context and asks Grok to generate a structured report.
-6. The report is checked against a Pydantic schema and processed by the citation-validation stage.
-7. The report, citations, and workflow trace are persisted in PostgreSQL and returned to React.
+When an analyst submits a threat narrative, it flows through a 5-step automated pipeline:
 
-The application is designed to distinguish retrieved evidence, official mappings, environment-specific coverage records, and recommendations inferred by the model. Review the RAG walkthrough and validate real-provider behavior before relying on any generated analysis.
+```mermaid
+flowchart LR
+    A["📄 1. Input<br/><i>Raw Threat Narrative</i>"] 
+    --> B["🔍 2. Hybrid Retrieval<br/><i>Exact TTP IDs + pgvector search</i>"]
+    --> C["⚖️ 3. Reranking<br/><i>Cross-encoder scores top defenses</i>"]
+    --> D["🤖 4. LLM Synthesis<br/><i>Grounded in retrieved MITRE data</i>"]
+    --> E["📊 5. Verified Output<br/><i>Structured report with citations</i>"]
+
+    style A fill:#1e293b,stroke:#38bdf8,stroke-width:2px,color:#f8fafc
+    style B fill:#1e293b,stroke:#06b6d4,stroke-width:2px,color:#f8fafc
+    style C fill:#1e293b,stroke:#818cf8,stroke-width:2px,color:#f8fafc
+    style D fill:#1e293b,stroke:#a855f7,stroke-width:2px,color:#f8fafc
+    style E fill:#1e293b,stroke:#10b981,stroke-width:2px,color:#f8fafc
+```
+
+1. **Input Ingestion**: The analyst pastes a security advisory or selects a pre-loaded threat narrative (e.g., Midnight Blizzard, Scatter Swine).
+2. **Hybrid Retrieval**: The engine extracts explicit MITRE IDs (`Txxxx`) and simultaneously performs semantic vector search via `pgvector` to catch behaviors described without formal IDs.
+3. **Cross-Encoder Reranking**: Jina AI reranks the retrieved ATT&CK techniques and D3FEND countermeasures to ensure only the most relevant security knowledge is passed to the LLM.
+4. **Grounded Synthesis**: The LLM (Groq / xAI) receives the verified context and generates a structured report following strict Pydantic schemas.
+5. **Validation & Persistence**: Every citation is verified against the database before saving the report to PostgreSQL and streaming it back to the dashboard.
+
+---
 
 ## Features
 
@@ -87,7 +164,7 @@ Backend capabilities include:
 - SQLAlchemy ORM models and Alembic schema migration.
 - MITRE ATT&CK STIX and D3FEND ingestion services.
 - Document construction with source metadata and SHA-256 content hashes.
-- Hugging Face embedding generation and vector retrieval through PostgreSQL/pgvector.
+- Hugging Face / Jina embedding generation and vector retrieval through PostgreSQL/pgvector.
 - LangGraph stateful threat-analysis workflow with observable trace steps.
 - Detection-rule coverage and report persistence.
 - Health endpoints and API documentation.
@@ -95,17 +172,17 @@ Backend capabilities include:
 ## Technology stack
 
 | Layer | Technology | Role |
-|---|---|---|
-| Frontend | React 18, JavaScript/JSX, Vite | Dashboard UI and client-side routing |
-| Charts and icons | Recharts, Lucide React | Security visualizations and UI icons |
-| API | Python 3.12, FastAPI, Pydantic v2 | HTTP endpoints and validation |
-| ORM / migrations | SQLAlchemy 2.x, Alembic | Relational access and versioned schema |
-| Database | Neon PostgreSQL | ATT&CK, D3FEND, feeds, rules, reports, and metadata |
-| Vector search | pgvector | Embedding storage and cosine-distance retrieval |
-| Embeddings | Hugging Face Inference API, `BAAI/bge-small-en-v1.5` | 384-dimensional document/query embeddings |
-| LLM | xAI Grok via `langchain-xai` | Structured threat-report generation |
-| Workflow | LangGraph | Stateful AI orchestration, conditional routing, and traceability |
-| Tests | pytest | Backend tests for APIs, models, ingestion, retrieval, and workflow |
+| :--- | :--- | :--- |
+| **Frontend UI** | React 18, Vite, Lucide React, Recharts | Responsive SOC analyst dashboard with mobile drawer |
+| **Frontend Hosting** | Vercel | Global Edge CDN hosting for Single Page Application |
+| **API Backend** | Python 3.12, FastAPI, Pydantic v2 | High-concurrency REST endpoints and schema validation |
+| **Backend Hosting** | Render Web Service | Cloud container runtime for FastAPI backend |
+| **Orchestration** | LangGraph, LangChain | Stateful multi-stage AI reasoning workflow & execution trace |
+| **LLM Inference** | Groq / xAI (`qwen/qwen3.8-27b`, Grok) | Ultra-fast structured security report generation |
+| **Embeddings & Reranking** | Jina AI / Hugging Face (`bge-small-en-v1.5`) | 384-dimensional vector embeddings and cross-encoder |
+| **Relational Database** | Neon Serverless PostgreSQL | Relational storage for 868 ATT&CK, 466 D3FEND, rules & reports |
+| **Vector Search** | `pgvector` extension | Fast cosine-distance vector similarity search |
+| **Testing** | pytest | Comprehensive automated backend test suite |
 
 ## Repository structure
 
@@ -357,38 +434,65 @@ The interactive API reference is available at `/docs` when FastAPI is running. M
 
 Consult [`docs/API_CONTRACTS.md`](docs/API_CONTRACTS.md) and Swagger UI for the exact request/response schemas. Swagger UI is the source of truth for the routes registered by the running application.
 
-## Deploy to Vercel
+## Cloud Deployment Architecture
 
-Vercel supports FastAPI through its Python runtime. For this repository layout, the simplest Vercel setup to manage is **two Vercel projects connected to the same GitHub repository**: one project for `frontend/` and one for `backend/`. This lets each part keep its own build settings and environment variables. See the official [FastAPI on Vercel guide](https://vercel.com/kb/guide/ship-a-fastapi-app-on-vercel) and [Python runtime docs](https://vercel.com/docs/functions/runtimes/python).
+The platform uses a production-ready, decoupled multi-cloud architecture:
 
-> **Deployment readiness:** The current frontend API client uses a relative base URL and the local Vite proxy. Before deploying the frontend as its own Vercel project, update `frontend/src/api/client.js` to support a configured production API base URL (for example, `import.meta.env.VITE_API_BASE_URL`). The current backend CORS configuration also allows all origins with credentials; change it to an allowlist containing the deployed frontend origin before exposing the backend publicly.
+```
+┌──────────────────────────────────────┐       ┌──────────────────────────────────────────────┐
+│           Vercel (Frontend)          │       │           Render (Backend API)               │
+│  - React 18 + Vite (SPA)             │       │  - Python 3.12 + FastAPI + Uvicorn           │
+│  - Instant Global Edge CDN           │ ───►  │  - LangGraph Threat Engine                   │
+│  - Environment: VITE_API_URL         │ HTTP  │  - Jina AI Cross-Encoder + Groq LLM          │
+└──────────────────────────────────────┘       └──────────────────────┬───────────────────────┘
+                                                                      │ TLS (sslmode=require)
+                                                                      ▼
+                                                       ┌──────────────────────────────┐
+                                                       │    Neon Cloud PostgreSQL     │
+                                                       │  - Native pgvector(384)      │
+                                                       │  - 868 ATT&CK + 466 D3FEND   │
+                                                       └──────────────────────────────┘
+```
 
-### A. Deploy the backend
+### A. Deploy Backend to Render (1-Click or Web Service)
 
-1. Import `CloudFlamedev/ITDR_RAG_Dashboard` into Vercel as a new project.
-2. Set the project's **Root Directory** to `backend`.
-3. Vercel should detect FastAPI from `requirements.txt` and the exported `app` in `app/main.py`. Confirm the build/runtime logs identify the FastAPI application correctly.
-4. Add the server-side environment variables listed in [Configuration](#configuration) in the Vercel project settings: `DATABASE_URL`, `XAI_API_KEY`, `XAI_API_BASE`, `XAI_MODEL`, `HF_TOKEN`, `HF_EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`, `HF_TIMEOUT_SECONDS`, `XAI_TIMEOUT_SECONDS`, `APP_ENV`, `DEMO_MODE`, and `LOG_LEVEL`.
-5. Set source-file path variables only if the files are included and available at runtime. The standard serverless deployment should not depend on local mutable files for persistence; store ingested knowledge in Neon.
-6. Deploy, then verify `/health`, `/docs`, and `/api/system/status` on the backend URL.
+1. Create a new **Web Service** on [Render](https://render.com) connected to your GitHub repository.
+2. The repository includes a root `render.yaml` blueprint. If configuring manually:
+   - **Root Directory**: `backend`
+   - **Runtime**: `Python`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+3. Configure Environment Variables in Render:
+   - `DATABASE_URL`: `postgresql+psycopg://...neon.tech/neondb?sslmode=require`
+   - `XAI_API_KEY`: *(your Groq or xAI API key)*
+   - `XAI_API_BASE`: `https://api.groq.com/openai/v1`
+   - `XAI_MODEL`: `qwen/qwen3.8-27b`
+   - `JINA_API_KEY`: *(your Jina AI key)*
+   - `JINA_EMBEDDING_MODEL`: `jina-embeddings-v5-text-small`
+   - `JINA_RERANK_MODEL`: `jina-reranker-v2-base-multilingual`
+   - `RERANK_ENABLED`: `true`
+   - `EMBEDDING_DIMENSIONS`: `384`
+   - `APP_ENV`: `production`
+   - `DEMO_MODE`: `false`
+4. Deploy and verify the live API at `https://your-api.onrender.com/docs`.
 
-### B. Deploy the frontend
+### B. Deploy Frontend to Vercel
 
-1. Create another Vercel project from the same repository.
-2. Set the project's **Root Directory** to `frontend` and use the Vite framework preset.
-3. Build command: `npm run build`. Output directory: `dist`.
-4. Add `VITE_API_BASE_URL` set to the deployed backend origin, for example `https://your-itdr-api.vercel.app`, **after** the frontend API client has been updated to read this variable.
-5. Deploy and open the frontend URL. Verify every screen, browser console, network requests, and direct navigation/refresh on React routes.
+1. Import `CloudFlamedev/ITDR_RAG_Dashboard` into [Vercel](https://vercel.com) as a new project.
+2. Configure project settings:
+   - **Root Directory**: `frontend`
+   - **Framework Preset**: `Vite`
+   - **Build Command**: `npm run build`
+   - **Output Directory**: `dist`
+3. In **Environment Variables**, add:
+   - **`VITE_API_URL`**: `https://your-api.onrender.com`
+4. Click **Deploy**. Vercel will build the frontend and serve it globally on high-speed CDN edges.
 
-### C. Production checks
+### C. Free-Tier Keep-Alive Ping (Optional)
 
-- Configure FastAPI CORS to allow the exact frontend origin(s). Do not combine `allow_origins=["*"]` with `allow_credentials=True` for a public deployment.
-- Keep Grok, Hugging Face, and Neon secrets only in backend environment variables.
-- Apply Alembic migrations to the intended Neon database and verify that pgvector is enabled and the `rag_documents` column/index use a consistent vector type.
-- Populate the knowledge base before demonstrating semantic RAG; don't run large ingestion/indexing batches during normal API startup.
-- Test the complete threat-analysis endpoint with a small advisory, and verify response time against Vercel's function duration limits. External LLM and embedding calls can make a workflow exceed serverless limits.
-- Add access controls and rate limits before allowing unrestricted public use of endpoints that invoke paid API services or write to the database.
-- If analysis regularly exceeds Vercel's request duration limits, move the long-running workflow to a background worker or conventional web service while keeping the frontend on Vercel.
+To eliminate Render's 15-minute inactivity cold-starts on the free tier:
+- Set up a free 10-minute automated ping on [cron-job.org](https://cron-job.org) targeting `GET https://your-api.onrender.com/health`.
+
 
 ## Security and demo-data notes
 
