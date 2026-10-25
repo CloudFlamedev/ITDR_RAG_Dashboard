@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: itdr-backend-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DEMO_MODE
+        value: "false"
+      - key: EMBEDDING_DIMENSIONS
+        value: "384"
+      - key: RERANK_ENABLED
+        value: "true"
+      - key: XAI_API_BASE
+        value: https://api.groq.com/openai/v1
+      - key: XAI_MODEL
+        value: qwen/qwen3.8-27b
+      - key: JINA_EMBEDDING_MODEL
+        value: jina-embeddings-v5-text-small
+      - key: JINA_RERANK_MODEL
+        value: jina-reranker-v2-base-multilingual
+      - key: DATABASE_URL
+        sync: false
+      - key: XAI_API_KEY
+        sync: false
+      - key: JINA_API_KEY
+        sync: false
