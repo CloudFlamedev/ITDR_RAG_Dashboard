@@ -64,11 +64,47 @@ vercel
 
 ---
 
-## Part 2: Deploying the Backend (Render / Railway / Koyeb)
+## Part 2: Deploying the Backend API
 
-Since our backend runs a long-running, stateful LangGraph threat modeling workflow with Groq LLM synthesis, a persistent Python container without 10-second serverless execution limits is required.
+Since our backend runs a stateful LangGraph threat modeling workflow with Groq LLM synthesis, a persistent Python container without 10-second serverless execution limits is required.
 
-### Deploying on Render (Free / Web Service)
+---
+
+### Option A: Hugging Face Spaces (Recommended for AI/RAG — 16 GB RAM & No 15-min Cold Starts)
+
+Hugging Face Spaces provides **2 vCPU, 16 GB RAM, and a free Docker runtime**. It stays active for **48 hours** without traffic (compared to Render's 15 minutes), making it the ideal host for AI/RAG applications.
+
+1. Go to [huggingface.co/new-space](https://huggingface.co/new-space).
+2. Configure your Space:
+   - **Space Name**: `itdr-backend-api`
+   - **License**: `mit`
+   - **Space SDK**: Select **Docker** → **Blank**
+   - **Space Hardware**: **CPU basic • 2 vCPU • 16 GB • Free**
+   - **Visibility**: **Public** (or Private)
+3. Click **Create Space**.
+4. In your Space repository, upload the contents of the `backend/` folder (`Dockerfile`, `requirements.txt`, `app/`, `data/`, `alembic/`, `alembic.ini`).
+   *(Or push via git using your Space repo clone URL).*
+5. Go to your Space **Settings** → **Variables and secrets** → Add New Secret:
+   ```env
+   DATABASE_URL=postgresql+psycopg://YOUR_NEON_STRING?sslmode=require
+   XAI_API_KEY=gsk_your_groq_api_key_here
+   XAI_API_BASE=https://api.groq.com/openai/v1
+   XAI_MODEL=qwen/qwen3.8-27b
+   JINA_API_KEY=jina_your_api_key_here
+   JINA_EMBEDDING_MODEL=jina-embeddings-v5-text-small
+   JINA_RERANK_MODEL=jina-reranker-v2-base-multilingual
+   RERANK_ENABLED=true
+   EMBEDDING_DIMENSIONS=384
+   APP_ENV=production
+   DEMO_MODE=false
+   ```
+6. The Space will build your Docker container. Once running, your direct API base URL is:
+   `https://YOUR_HF_USERNAME-itdr-backend-api.hf.space`
+   *(Test it by visiting `https://YOUR_HF_USERNAME-itdr-backend-api.hf.space/docs` to see Swagger UI).*
+
+---
+
+### Option B: Deploying on Render (Free Web Service)
 
 1. Go to [render.com](https://render.com) and click **New +** -> **Web Service**.
 2. Connect your GitHub repository.
