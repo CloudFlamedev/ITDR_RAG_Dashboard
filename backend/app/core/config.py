@@ -58,6 +58,16 @@ class Settings(BaseSettings):
     D3FEND_FILE: str = Field(default="./data/d3fend.json", description="Path to MITRE D3FEND ontology JSON")
 
     @property
+    def normalized_database_url(self) -> str:
+        """Ensure database URL is formatted with the modern postgresql+psycopg driver."""
+        url = self.DATABASE_URL or ""
+        if url.startswith("postgres://"):
+            return url.replace("postgres://", "postgresql+psycopg://", 1)
+        if url.startswith("postgresql://") and not url.startswith("postgresql+"):
+            return url.replace("postgresql://", "postgresql+psycopg://", 1)
+        return url
+
+    @property
     def is_neon(self) -> bool:
         """Check if connected to Neon cloud postgres based on host or query string."""
         return "neon.tech" in self.DATABASE_URL or "sslmode=require" in self.DATABASE_URL

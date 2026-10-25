@@ -10,7 +10,7 @@ settings = get_settings()
 
 # Configure engine with connection pooling and pre-ping to handle cloud sleep/wake
 engine = create_engine(
-    settings.DATABASE_URL,
+    settings.normalized_database_url,
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20,
