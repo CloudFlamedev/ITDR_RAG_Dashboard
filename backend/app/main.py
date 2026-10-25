@@ -51,3 +51,18 @@ app.include_router(coverage_router)
 app.include_router(feeds_router)
 app.include_router(threats_router)
 app.include_router(rag_router)
+
+
+@app.get("/", tags=["Root"])
+def get_root():
+    """Root endpoint welcoming visitors and providing API discovery links."""
+    return {
+        "service": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "environment": settings.APP_ENV,
+        "status": "online",
+        "documentation": "/docs",
+        "health": "/health",
+        "telemetry": "/api/system/status",
+    }
+

@@ -2,6 +2,11 @@ import pytest
 
 
 def test_health_endpoints(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    assert r.json()["status"] == "online"
+    assert "documentation" in r.json()
+
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json()["status"] == "healthy"
