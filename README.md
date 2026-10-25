@@ -87,7 +87,7 @@ The system is organized into four clean, decoupled tiers:
 flowchart TD
     %% TIER 1: CLIENT & DASHBOARD
     subgraph Tier1 ["1. Presentation Layer (Vercel)"]
-        User["👤 Security Analyst / Recruiter"]
+        User["👤 Security Analyst"]
         Dashboard["💻 React 18 + Vite SPA<br/><i>(Interactive Security Dashboard & Mobile Drawer)</i>"]
         User <-->|HTTPS| Dashboard
     end
