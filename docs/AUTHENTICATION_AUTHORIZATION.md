@@ -70,20 +70,20 @@ The ITDR platform implements a **defense-in-depth, zero-trust security perimeter
 - **Timing Attack Defense**: When an unknown email address is supplied, the server performs a dummy Argon2id calculation against a pre-computed hash to ensure constant response times.
 - **Rate Limiting**: In-memory sliding window limiter (`LoginRateLimiter`) blocks repeated failed attempts (default: 5 failures within 60 seconds). When tripped, returns `HTTP 429 Too Many Requests` with a `Retry-After` header.
 
-### B. Public Self-Registration & Email Verification Flow
+### B. Public Self-Registration & Immediate Access Flow
 - **Endpoint**: `POST /api/auth/register`
 - **Role Assignment**: Automatically assigns `Demo Analyst` role. Public registration payloads attempting to specify `role` or `roles` are strictly ignored.
-- **Token Generation**: Generates 32-byte URL-safe cryptographic token using `secrets.token_urlsafe(32)`.
-- **Database Storage**: Raw token is never stored in PostgreSQL. Only its deterministic SHA-256 hash is saved in `email_verification_tokens`.
-- **Token Expiration**: Default 30 minutes (`EMAIL_VERIFICATION_EXPIRE_MINUTES`).
+- **Immediate Login**: Accounts are provisioned with `is_active=True` and `is_verified=False` (not falsely represented as provider-verified).
+- **No Mandatory Email Verification**: Visitors can log in immediately upon registration without depending on SMTP email delivery.
+- **Rate Limiting**: `registration_rate_limiter` restricts registration to 5 attempts per minute per IP address (`HTTP 429`).
 - **Activation Flow**:
-  1. User registers via `/register`. Account is created with `is_verified=False`.
-  2. Verification email dispatched via configured provider (`console`, `smtp`, or `mock`).
-  3. User opens `/verify-email?token=...`.
-  4. Backend verifies hash, expiration, and ensures token has not been previously consumed (`used_at IS NULL`).
-  5. Upon successful verification, user is marked `is_verified=True`, token is marked `used_at=now`, and audit log is recorded.
-- **Login Guard**: Unverified users attempting traditional password login are blocked with `HTTP 403 Forbidden` and given a one-click resend option.
-- **Resend Endpoint**: `POST /api/auth/resend-verification` enforces a 60-second cooldown rate limit.
+  1. User registers via `/register` with full name, email, password, and password confirmation.
+  2. Input fields and password complexity rules are validated via Pydantic.
+  3. Password is securely hashed using Argon2id.
+  4. User is created in PostgreSQL with active status and assigned the `Demo Analyst` role.
+  5. The frontend displays `"Your account has been created successfully. You can now log in."` and redirects the user to `/login`.
+  6. The user logs in immediately using their email and password; session cookies and CSRF tokens are established.
+- **Optional Verification**: Optional token verification remains supported for visitors desiring full verification status via `POST /api/auth/verify-email`.
 
 ### C. Social Single Sign-On (Google OIDC & GitHub OAuth 2.0)
 - **Google OpenID Connect**:
@@ -190,12 +190,12 @@ Database-level immutability is guaranteed by trigger `trg_audit_logs_immutable` 
 
 ## 7. Automated Test Coverage Summary
 
-Total automated tests passing: **62 / 62 tests (100% Pass Rate)**
+Total automated tests passing: **65 / 65 tests (100% Pass Rate)**
 
 | Test Suite | File | Tests | Execution Time | Result |
 |---|---|:---:|:---:|:---:|
-| Public Registration & Social Auth | `test_public_registration_and_social.py` | 27 | 270.79s | 🟢 **27/27 PASS** |
+| Public Registration & Social Auth | `test_public_registration_and_social.py` | 30 | ~275s | 🟢 **30/30 PASS** |
 | Core Authentication & RBAC Hardening | `test_auth_rbac.py` | 29 | 196.83s | 🟢 **29/29 PASS** |
 | API Regression & Business Logic | `test_api_endpoints.py` | 6 | 154.69s | 🟢 **6/6 PASS** |
-| Frontend Production Build | Vite 5.4.21 | 2,386 modules | 3.96s | 🟢 **0 ERRORS** |
+| Frontend Production Build | Vite 5.4.21 | 2,386 modules | 3.98s | 🟢 **0 ERRORS** |
 

@@ -116,21 +116,7 @@ class AuthService:
                 detail="Invalid email or password.",
             )
 
-        # 6. Check email verification status
-        if not user.is_verified:
-            self.log_audit_event(
-                user_id=user.id,
-                action="login_rejected_unverified_email",
-                resource="auth",
-                ip_address=ip_address,
-                metadata={"email": clean_email},
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Email address has not been verified. Please verify your email before logging in, or request a new verification link.",
-            )
-
-        # 7. Reset rate limits and record login timestamp
+        # 6. Reset rate limits and record login timestamp
         login_rate_limiter.reset(rate_limit_key)
         now = datetime.datetime.now(datetime.timezone.utc)
         user.last_login_at = now
@@ -429,7 +415,7 @@ class AuthService:
         email: str,
         password: str,
         ip_address: Optional[str] = None,
-    ) -> Tuple[User, str]:
+    ) -> User:
         """
         Public self-registration for portfolio demo visitors:
         - Rejects registration if disabled in settings
@@ -437,9 +423,8 @@ class AuthService:
         - Prevents duplicate registration
         - Hashes password using Argon2id
         - Automatically assigns Demo Analyst role (prevents elevation)
-        - Creates account with is_verified=False
-        - Generates SHA-256 hashed verification token
-        - Dispatches verification email
+        - Creates account with is_active=True, is_verified=False (not falsely marked as provider-verified)
+        - Enables immediate login without mandatory email verification or SMTP dependency
         - Logs audit event
         """
         if not settings.PUBLIC_REGISTRATION_ENABLED:
@@ -481,29 +466,8 @@ class AuthService:
             roles=[assigned_role] if assigned_role else [],
         )
         self.db.add(new_user)
-        self.db.flush()
-
-        # Generate verification token
-        raw_token, token_hash = generate_verification_token()
-        expires_at = now + datetime.timedelta(minutes=settings.EMAIL_VERIFICATION_EXPIRE_MINUTES)
-
-        verif_token = EmailVerificationToken(
-            user_id=new_user.id,
-            token_hash=token_hash,
-            expires_at=expires_at,
-            created_at=now,
-            used_at=None,
-        )
-        self.db.add(verif_token)
         self.db.commit()
         self.db.refresh(new_user)
-
-        # Dispatch email
-        email_service.send_verification_email(
-            to_email=clean_email,
-            raw_token=raw_token,
-            full_name=new_user.full_name,
-        )
 
         self.log_audit_event(
             user_id=new_user.id,
@@ -513,7 +477,7 @@ class AuthService:
             metadata={"email": clean_email, "role": assigned_role.name if assigned_role else "None"},
         )
 
-        return new_user, raw_token
+        return new_user
 
     def verify_email_token(
         self,

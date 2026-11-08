@@ -28,8 +28,7 @@ export const Login = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState(searchParams.get('error') || null);
   const [isVerifiedNotice, setIsVerifiedNotice] = useState(searchParams.get('verified') === 'true');
-  const [isResending, setIsResending] = useState(false);
-  const [resendStatusMsg, setResendStatusMsg] = useState(null);
+  const [isRegisteredNotice, setIsRegisteredNotice] = useState(searchParams.get('registered') === 'true');
 
   const destination = location.state?.from?.pathname || '/';
 
@@ -59,24 +58,6 @@ export const Login = () => {
     }
   };
 
-  const handleResendVerification = async () => {
-    if (!email) {
-      setErrorMsg('Please enter your email address to receive a verification link.');
-      return;
-    }
-    setIsResending(true);
-    setResendStatusMsg(null);
-    try {
-      const res = await apiClient.resendVerification(email);
-      setResendStatusMsg(res.message || 'Verification link sent! Please check your inbox.');
-    } catch (err) {
-      const detail = err.response?.data?.detail;
-      setErrorMsg(detail || err.message || 'Could not resend verification email.');
-    } finally {
-      setIsResending(false);
-    }
-  };
-
   const handleOAuthLogin = (provider) => {
     const rawApiBase = import.meta.env.VITE_API_URL || '';
     const apiBase = rawApiBase.endsWith('/') ? rawApiBase.slice(0, -1) : rawApiBase;
@@ -97,6 +78,24 @@ export const Login = () => {
           </p>
         </div>
 
+        {/* Registration Success Banner */}
+        {isRegisteredNotice && (
+          <div
+            className="login-alert-banner"
+            style={{
+              borderColor: 'rgba(34, 197, 94, 0.4)',
+              backgroundColor: 'rgba(34, 197, 94, 0.1)',
+              color: '#4ade80',
+              marginBottom: '16px',
+            }}
+          >
+            <CheckCircle2 size={18} className="login-alert-icon" style={{ color: '#4ade80' }} />
+            <div className="login-alert-text">
+              Your account has been created successfully. You can now log in.
+            </div>
+          </div>
+        )}
+
         {/* Verification Success Banner */}
         {isVerifiedNotice && (
           <div
@@ -115,49 +114,12 @@ export const Login = () => {
           </div>
         )}
 
-        {/* Resend Status Banner */}
-        {resendStatusMsg && (
-          <div
-            className="login-alert-banner"
-            style={{
-              borderColor: 'rgba(34, 197, 94, 0.4)',
-              backgroundColor: 'rgba(34, 197, 94, 0.1)',
-              color: '#4ade80',
-              marginBottom: '16px',
-            }}
-          >
-            <CheckCircle2 size={18} className="login-alert-icon" style={{ color: '#4ade80' }} />
-            <div className="login-alert-text">{resendStatusMsg}</div>
-          </div>
-        )}
-
         {/* Error Alert Banner */}
         {errorMsg && (
           <div className="login-alert-banner">
             <AlertTriangle size={18} className="login-alert-icon" />
             <div className="login-alert-text">
               <div>{errorMsg}</div>
-              {errorMsg.toLowerCase().includes('not been verified') && (
-                <div style={{ marginTop: '8px' }}>
-                  <button
-                    type="button"
-                    onClick={handleResendVerification}
-                    disabled={isResending}
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      color: 'var(--accent-cyan)',
-                      textDecoration: 'underline',
-                      cursor: 'pointer',
-                      fontSize: '12px',
-                      padding: 0,
-                      fontWeight: 600,
-                    }}
-                  >
-                    {isResending ? 'Sending verification email...' : 'Resend verification link \u2192'}
-                  </button>
-                </div>
-              )}
             </div>
           </div>
         )}

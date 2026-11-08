@@ -63,7 +63,7 @@ def get_user_auth_client(email: str, password: str) -> TestClient:
 # ==============================================================================
 
 def test_public_registration_success(client, db):
-    """Test successful public registration, default Demo Analyst role, and unverified initial state."""
+    """Test successful public registration, default Demo Analyst role, active state, and immediate login."""
     uid = uuid.uuid4().hex[:8]
     email = f"analyst_{uid}@portfolio.demo"
     password = "SecurePassword123!"
@@ -78,8 +78,9 @@ def test_public_registration_success(client, db):
     assert resp.status_code == 201
     data = resp.json()
     assert data["email"] == email.lower()
+    assert data["is_active"] is True
     assert data["is_verified"] is False
-    assert "token" in data
+    assert "can now log in" in data["message"].lower()
 
     # Verify database state
     user = db.query(User).filter(User.email == email.lower()).first()
@@ -90,6 +91,12 @@ def test_public_registration_success(client, db):
     # Ensure neither Admin nor Security Analyst roles were granted
     assert "Admin" not in [r.name for r in user.roles]
     assert "Security Analyst" not in [r.name for r in user.roles]
+
+    # Verify user can immediately log in without email verification
+    login_resp = client.post("/api/auth/login", json={"email": email, "password": password})
+    assert login_resp.status_code == 200
+    assert login_resp.json()["user"]["email"] == email.lower()
+    assert login_resp.json()["user"]["is_active"] is True
 
 
 def test_registration_password_complexity_validation(client):
@@ -238,134 +245,112 @@ def test_registration_cannot_specify_elevated_role(client, db):
 
 
 # ==============================================================================
-# 2. Email Verification Tests
+# 2. Registration Without Mandatory Verification & Login Behavior
 # ==============================================================================
 
-def test_email_verification_token_hashed_in_db(client, db):
-    """Verify that only the SHA-256 hash of the verification token is stored in the database."""
+def test_registration_succeeds_without_smtp_configuration(client, db):
+    """Verify that public registration succeeds without requiring SMTP configuration."""
     uid = uuid.uuid4().hex[:8]
-    email = f"tokenhash_{uid}@test.demo"
-
-    resp = client.post("/api/auth/register", json={
-        "full_name": "Token Hash Test",
-        "email": email,
-        "password": "Password123!",
-        "confirm_password": "Password123!",
-    })
-    assert resp.status_code == 201
-    raw_token = resp.json()["token"]
-
-    user = db.query(User).filter(User.email == email).first()
-    token_record = db.query(EmailVerificationToken).filter(EmailVerificationToken.user_id == user.id).first()
-
-    assert token_record is not None
-    expected_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-    assert token_record.token_hash == expected_hash
-    # The raw token itself is NOT stored anywhere in the table
-    assert raw_token != token_record.token_hash
-
-
-def test_unverified_account_login_blocked(client):
-    """Verify that an unverified account cannot log in and receives HTTP 403 Forbidden."""
-    uid = uuid.uuid4().hex[:8]
-    email = f"unverified_{uid}@test.demo"
+    email = f"nosmtp_{uid}@test.demo"
     password = "Password123!"
 
-    # Register
-    client.post("/api/auth/register", json={
-        "full_name": "Unverified User",
+    resp = client.post("/api/auth/register", json={
+        "full_name": "No SMTP User",
         "email": email,
         "password": password,
         "confirm_password": password,
     })
+    assert resp.status_code == 201
+    assert resp.json()["is_active"] is True
 
-    # Attempt login
-    login_resp = client.post("/api/auth/login", json={"email": email, "password": password})
-    assert login_resp.status_code == 403
-    assert "not been verified" in login_resp.json()["detail"].lower()
+    # User in database is active and can log in immediately
+    user = db.query(User).filter(User.email == email).first()
+    assert user.is_active is True
+    assert user.is_verified is False
 
 
-def test_email_verification_success_and_subsequent_login(client, db):
-    """Test successful email verification activates user and allows subsequent login."""
+def test_user_can_immediately_login_after_registration(client):
+    """Verify that a user can immediately log in after registering, without email verification."""
     uid = uuid.uuid4().hex[:8]
-    email = f"verify_success_{uid}@test.demo"
+    email = f"immediate_{uid}@test.demo"
     password = "Password123!"
 
     reg_resp = client.post("/api/auth/register", json={
-        "full_name": "Verify Success",
+        "full_name": "Immediate Login User",
         "email": email,
         "password": password,
         "confirm_password": password,
     })
     assert reg_resp.status_code == 201
-    raw_token = reg_resp.json()["token"]
 
-    # Verify email
-    verif_resp = client.post("/api/auth/verify-email", json={"token": raw_token})
-    assert verif_resp.status_code == 200
-    assert verif_resp.json()["is_verified"] is True
-
-    # User in DB is verified
-    user = db.query(User).filter(User.email == email).first()
-    assert user.is_verified is True
-
-    # Now login succeeds
     login_resp = client.post("/api/auth/login", json={"email": email, "password": password})
     assert login_resp.status_code == 200
-    assert login_resp.json()["user"]["is_verified"] is True
+    data = login_resp.json()
+    assert data["user"]["email"] == email.lower()
+    assert data["user"]["is_active"] is True
+    assert "itdr_session" in login_resp.cookies
+    assert "itdr_csrf" in login_resp.cookies
 
 
-def test_email_verification_reuse_blocked(client):
-    """Test that a verification token cannot be reused once consumed."""
+def test_no_verification_email_sent_on_registration(client):
+    """Verify that no verification email is dispatched during traditional registration."""
+    mock_sent_emails.clear()
     uid = uuid.uuid4().hex[:8]
-    email = f"reuse_{uid}@test.demo"
+    email = f"nomail_{uid}@test.demo"
     password = "Password123!"
 
-    reg_resp = client.post("/api/auth/register", json={
-        "full_name": "Reuse Test",
+    resp = client.post("/api/auth/register", json={
+        "full_name": "No Mail User",
         "email": email,
         "password": password,
         "confirm_password": password,
     })
-    raw_token = reg_resp.json()["token"]
-
-    # First use
-    v1 = client.post("/api/auth/verify-email", json={"token": raw_token})
-    assert v1.status_code == 200
-
-    # Second use fails
-    v2 = client.post("/api/auth/verify-email", json={"token": raw_token})
-    assert v2.status_code == 400
-    assert "already been used" in v2.json()["detail"].lower()
+    assert resp.status_code == 201
+    assert len(mock_sent_emails) == 0
 
 
-def test_email_verification_expired_token(client, db):
-    """Test that expired verification tokens are rejected."""
+def test_invalid_password_rejected(client):
+    """Verify that login fails with 401 when an incorrect password is provided."""
     uid = uuid.uuid4().hex[:8]
-    email = f"expired_{uid}@test.demo"
-    password = "Password123!"
+    email = f"badpwd_{uid}@test.demo"
+    password = "CorrectPassword123!"
 
-    reg_resp = client.post("/api/auth/register", json={
-        "full_name": "Expired Test",
+    client.post("/api/auth/register", json={
+        "full_name": "Bad Pwd User",
         "email": email,
         "password": password,
         "confirm_password": password,
     })
-    raw_token = reg_resp.json()["token"]
 
-    # Manually expire the token in the database
-    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-    record = db.query(EmailVerificationToken).filter_by(token_hash=token_hash).first()
-    record.expires_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=10)
+    login_resp = client.post("/api/auth/login", json={"email": email, "password": "WrongPassword999!"})
+    assert login_resp.status_code == 401
+    assert "invalid email or password" in login_resp.json()["detail"].lower()
+
+
+def test_inactive_account_blocked_from_login(client, db):
+    """Verify that deactivated / inactive accounts receive HTTP 403 Forbidden on login."""
+    uid = uuid.uuid4().hex[:8]
+    email = f"inactive_{uid}@test.demo"
+    password = "Password123!"
+
+    client.post("/api/auth/register", json={
+        "full_name": "Inactive Account User",
+        "email": email,
+        "password": password,
+        "confirm_password": password,
+    })
+
+    user = db.query(User).filter(User.email == email).first()
+    user.is_active = False
     db.commit()
 
-    verif_resp = client.post("/api/auth/verify-email", json={"token": raw_token})
-    assert verif_resp.status_code == 400
-    assert "expired" in verif_resp.json()["detail"].lower()
+    login_resp = client.post("/api/auth/login", json={"email": email, "password": password})
+    assert login_resp.status_code == 403
+    assert "deactivated" in login_resp.json()["detail"].lower()
 
 
 def test_resend_verification_email_and_rate_limit(client):
-    """Test resending verification email and enforcing 60s cooldown rate limit."""
+    """Test voluntary verification email resend and 60s cooldown rate limit."""
     uid = uuid.uuid4().hex[:8]
     email = f"resend_{uid}@test.demo"
     password = "Password123!"
@@ -377,7 +362,7 @@ def test_resend_verification_email_and_rate_limit(client):
         "confirm_password": password,
     })
 
-    # First resend succeeds
+    # First voluntary resend succeeds
     r1 = client.post("/api/auth/resend-verification", json={"email": email})
     assert r1.status_code == 200
 
@@ -385,6 +370,35 @@ def test_resend_verification_email_and_rate_limit(client):
     r2 = client.post("/api/auth/resend-verification", json={"email": email})
     assert r2.status_code == 429
     assert "wait" in r2.json()["detail"].lower()
+
+
+def test_optional_verification_token_lifecycle(client, db):
+    """Verify that if a user voluntarily uses a verification token, is_verified is updated."""
+    auth_svc = AuthService(db)
+    uid = uuid.uuid4().hex[:8]
+    email = f"opt_verif_{uid}@test.demo"
+    user = auth_svc.register_public_user("Opt User", email, "Password123!")
+
+    # Voluntarily generate token
+    raw_token, token_hash = generate_verification_token()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    token_record = EmailVerificationToken(
+        user_id=user.id,
+        token_hash=token_hash,
+        expires_at=now + datetime.timedelta(minutes=30),
+        created_at=now,
+    )
+    db.add(token_record)
+    db.commit()
+
+    # Verify email
+    v_resp = client.post("/api/auth/verify-email", json={"token": raw_token})
+    assert v_resp.status_code == 200
+    assert v_resp.json()["is_verified"] is True
+
+    # User in database is now marked verified
+    db.refresh(user)
+    assert user.is_verified is True
 
 
 # ==============================================================================
@@ -416,8 +430,8 @@ def test_oauth_existing_user_linking(db):
     email = f"link_test_{uid}@example.com"
     auth_svc = AuthService(db)
 
-    # Register as unverified user first
-    user, _ = auth_svc.register_public_user(
+    # Register as user first (active, but unverified email)
+    user = auth_svc.register_public_user(
         full_name="Pre Registered",
         email=email,
         password="Password123!",
@@ -430,6 +444,7 @@ def test_oauth_existing_user_linking(db):
         provider_user_id=f"gh_{uid}",
         verified_email=email,
         full_name="Pre Registered GitHub",
+        email_verified=True,
     )
 
     assert linked_user.id == user.id
@@ -446,13 +461,11 @@ def test_multi_tenant_report_isolation(client, db):
     uid = uuid.uuid4().hex[:6]
 
     # User 1 (Demo Analyst)
-    u1, t1 = auth_svc.register_public_user(f"User One {uid}", f"u1_{uid}@demo.local", "Password123!")
-    auth_svc.verify_email_token(t1)
+    u1 = auth_svc.register_public_user(f"User One {uid}", f"u1_{uid}@demo.local", "Password123!")
     client_u1 = get_user_auth_client(f"u1_{uid}@demo.local", "Password123!")
 
     # User 2 (Demo Analyst)
-    u2, t2 = auth_svc.register_public_user(f"User Two {uid}", f"u2_{uid}@demo.local", "Password123!")
-    auth_svc.verify_email_token(t2)
+    u2 = auth_svc.register_public_user(f"User Two {uid}", f"u2_{uid}@demo.local", "Password123!")
     client_u2 = get_user_auth_client(f"u2_{uid}@demo.local", "Password123!")
 
     # Admin Client
@@ -519,8 +532,7 @@ def test_usage_limits_advisory_length(db):
     """Test that advisory texts exceeding MAX_ADVISORY_CHARS are rejected with HTTP 400."""
     auth_svc = AuthService(db)
     uid = uuid.uuid4().hex[:6]
-    u, t = auth_svc.register_public_user(f"Quota User {uid}", f"quota_{uid}@demo.local", "Password123!")
-    auth_svc.verify_email_token(t)
+    u = auth_svc.register_public_user(f"Quota User {uid}", f"quota_{uid}@demo.local", "Password123!")
     client_user = get_user_auth_client(f"quota_{uid}@demo.local", "Password123!")
 
     # Exceed 15,000 characters
@@ -534,8 +546,7 @@ def test_daily_analysis_quota_enforcement(db):
     """Test that non-admins cannot exceed DAILY_ANALYSIS_LIMIT per 24 hours (HTTP 429)."""
     auth_svc = AuthService(db)
     uid = uuid.uuid4().hex[:6]
-    u, t = auth_svc.register_public_user(f"Limit User {uid}", f"limit_{uid}@demo.local", "Password123!")
-    auth_svc.verify_email_token(t)
+    u = auth_svc.register_public_user(f"Limit User {uid}", f"limit_{uid}@demo.local", "Password123!")
     client_user = get_user_auth_client(f"limit_{uid}@demo.local", "Password123!")
 
     # Seed 5 completed reports for this user in the last 24 hours
@@ -579,8 +590,7 @@ def test_demo_analyst_rbac_boundaries(db):
     """Verify Demo Analyst can access exploratory endpoints, but is denied administrative/ingest operations."""
     auth_svc = AuthService(db)
     uid = uuid.uuid4().hex[:6]
-    u, t = auth_svc.register_public_user(f"RBAC User {uid}", f"rbac_{uid}@demo.local", "Password123!")
-    auth_svc.verify_email_token(t)
+    u = auth_svc.register_public_user(f"RBAC User {uid}", f"rbac_{uid}@demo.local", "Password123!")
     demo_client = get_user_auth_client(f"rbac_{uid}@demo.local", "Password123!")
 
     # Allowed endpoints (read + analyze)
@@ -724,7 +734,20 @@ def test_concurrent_verification_single_use(db):
     auth_svc = AuthService(db)
     uid = uuid.uuid4().hex[:8]
     email = f"atomic_verif_{uid}@test.demo"
-    user, raw_token = auth_svc.register_public_user("Atomic User", email, "Password123!")
+    user = auth_svc.register_public_user("Atomic User", email, "Password123!")
+
+    # Voluntarily create token
+    raw_token, token_hash = generate_verification_token()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    verif_token = EmailVerificationToken(
+        user_id=user.id,
+        token_hash=token_hash,
+        expires_at=now + datetime.timedelta(minutes=30),
+        created_at=now,
+        used_at=None,
+    )
+    db.add(verif_token)
+    db.commit()
 
     # Verify once
     verified_user = auth_svc.verify_email_token(raw_token)
@@ -742,12 +765,10 @@ def test_threat_feed_ownership_isolation(client, db):
     auth_svc = AuthService(db)
     uid = uuid.uuid4().hex[:6]
 
-    u1, t1 = auth_svc.register_public_user(f"Feed Owner {uid}", f"fowner_{uid}@demo.local", "Password123!")
-    auth_svc.verify_email_token(t1)
+    u1 = auth_svc.register_public_user(f"Feed Owner {uid}", f"fowner_{uid}@demo.local", "Password123!")
     client_u1 = get_user_auth_client(f"fowner_{uid}@demo.local", "Password123!")
 
-    u2, t2 = auth_svc.register_public_user(f"Feed Other {uid}", f"fother_{uid}@demo.local", "Password123!")
-    auth_svc.verify_email_token(t2)
+    u2 = auth_svc.register_public_user(f"Feed Other {uid}", f"fother_{uid}@demo.local", "Password123!")
     client_u2 = get_user_auth_client(f"fother_{uid}@demo.local", "Password123!")
 
     client_admin = get_user_auth_client("admin@itdr.local", "AdminPass123!")
@@ -809,8 +830,7 @@ def test_emergency_killswitch(client, db, monkeypatch):
     """Verify that PUBLIC_LLM_ANALYSIS_ENABLED = False blocks non-admins (503) while allowing Admin."""
     auth_svc = AuthService(db)
     uid = uuid.uuid4().hex[:6]
-    u, t = auth_svc.register_public_user(f"Kill User {uid}", f"kill_{uid}@demo.local", "Password123!")
-    auth_svc.verify_email_token(t)
+    u = auth_svc.register_public_user(f"Kill User {uid}", f"kill_{uid}@demo.local", "Password123!")
     client_user = get_user_auth_client(f"kill_{uid}@demo.local", "Password123!")
 
     # Disable kill switch
@@ -829,8 +849,7 @@ def test_global_analysis_quota_enforcement(client, db, monkeypatch):
     """Verify that non-admins cannot analyze if global daily capacity is reached (HTTP 429)."""
     auth_svc = AuthService(db)
     uid = uuid.uuid4().hex[:6]
-    u, t = auth_svc.register_public_user(f"Global User {uid}", f"global_{uid}@demo.local", "Password123!")
-    auth_svc.verify_email_token(t)
+    u = auth_svc.register_public_user(f"Global User {uid}", f"global_{uid}@demo.local", "Password123!")
     client_user = get_user_auth_client(f"global_{uid}@demo.local", "Password123!")
 
     from app.api import threats as threats_api
@@ -841,4 +860,41 @@ def test_global_analysis_quota_enforcement(client, db, monkeypatch):
     })
     assert r.status_code == 429
     assert "global daily threat analysis capacity reached" in r.json()["detail"].lower()
+
+
+def test_google_login_requires_verified_provider_email(db):
+    """Verify that Google OAuth requires a verified email from the identity provider."""
+    from fastapi import HTTPException
+    auth_svc = AuthService(db)
+    uid = uuid.uuid4().hex[:8]
+
+    with pytest.raises(HTTPException) as exc_info:
+        auth_svc.handle_oauth_user(
+            provider="google",
+            provider_user_id=f"goog_unverified_{uid}",
+            verified_email=f"attacker_goog_{uid}@gmail.com",
+            full_name="Unverified Google User",
+            email_verified=False,
+        )
+    assert exc_info.value.status_code == 400
+    assert "not verified" in exc_info.value.detail.lower()
+
+
+def test_github_login_requires_verified_provider_email(db):
+    """Verify that GitHub OAuth requires a verified email from the identity provider."""
+    from fastapi import HTTPException
+    auth_svc = AuthService(db)
+    uid = uuid.uuid4().hex[:8]
+
+    with pytest.raises(HTTPException) as exc_info:
+        auth_svc.handle_oauth_user(
+            provider="github",
+            provider_user_id=f"gh_unverified_{uid}",
+            verified_email=f"attacker_gh_{uid}@github.com",
+            full_name="Unverified GitHub User",
+            email_verified=False,
+        )
+    assert exc_info.value.status_code == 400
+    assert "not verified" in exc_info.value.detail.lower()
+
 

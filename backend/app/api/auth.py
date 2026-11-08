@@ -291,7 +291,7 @@ def register_public_user(
     registration_rate_limiter.record_failed_attempt(client_ip)
 
     auth_svc = AuthService(db)
-    user, raw_token = auth_svc.register_public_user(
+    user = auth_svc.register_public_user(
         full_name=payload.full_name,
         email=payload.email,
         password=payload.password,
@@ -299,11 +299,10 @@ def register_public_user(
     )
 
     return {
-        "message": "Account created successfully! Please check your email for the verification link.",
+        "message": "Your account has been created successfully. You can now log in.",
         "email": user.email,
+        "is_active": user.is_active,
         "is_verified": user.is_verified,
-        # Expose raw token in non-production/test for automated testing convenience
-        "token": raw_token if not settings.is_production else None,
     }
 
 

@@ -16,9 +16,9 @@ A comprehensive security audit, functional verification, and regression evaluati
 The platform has been successfully transformed from an enterprise invite-only model to a **secure public portfolio demonstration system**, enabling external visitors and interviewers to self-register or sign in with Google/GitHub, explore the SOC dashboard, and execute bounded GenAI threat modeling without compromising data isolation or service quotas.
 
 ### Key Capabilities Verified:
-1. **Public Self-Registration (`/register`)**: Validated with Pydantic; enforces strict password complexity rules, email normalization, duplicate prevention, and Argon2id memory-hard hashing. Prevents privilege escalation by strictly enforcing the bounded `Demo Analyst` role.
-2. **Cryptographic Email Verification**: Secure 32-byte tokens hashed via SHA-256 before storage in PostgreSQL (`email_verification_tokens`). Unverified accounts cannot log in (HTTP 403) and can request fresh links protected by a 60-second cooldown rate limit.
-3. **Seamless Social Sign-Up**: Google OIDC and GitHub OAuth auto-provision unregistered visitors with `is_verified=True` and `Demo Analyst` permissions.
+1. **Public Self-Registration (`/register`) & Immediate Login**: Validated with Pydantic; enforces strict password complexity rules, email normalization, duplicate prevention, and Argon2id memory-hard hashing. Prevents privilege escalation by strictly enforcing the bounded `Demo Analyst` role with `is_active=True`, allowing users to log in immediately without requiring mandatory email delivery or SMTP configuration.
+2. **Cryptographic Email Verification (Optional & Non-Destructive)**: Secure 32-byte tokens hashed via SHA-256 before storage in PostgreSQL (`email_verification_tokens`). Optional voluntary verification remains supported via `POST /api/auth/resend-verification` and `POST /api/auth/verify-email` protected by rate limiting and cooldowns.
+3. **Seamless Social Sign-Up**: Google OIDC and GitHub OAuth auto-provision unregistered visitors with `is_verified=True` (guaranteed by provider email verification) and `Demo Analyst` permissions.
 4. **Multi-Tenant Report Isolation**: Custom user reports are scoped by `created_by_user_id`. Non-admins can only see their own reports and shared portfolio demo reports; attempts to inspect reports belonging to other users return HTTP 404. SOC Administrators retain full platform oversight.
 5. **Usage Bounds & Abuse Mitigation**: Enforces a 15,000 character maximum advisory input size (`MAX_ADVISORY_CHARS`), a 5 analysis per 24-hour quota (`DAILY_ANALYSIS_LIMIT`), a 30 search/min RAG rate limit, and audit logging on quota trips.
 6. **Zero-Regression Enterprise Hardening**: Strict OAuth forwarded host header injection prevention, masked Admin bootstrap CLI, append-only immutable audit logs (PostgreSQL trigger + ORM listeners), and Vercel reverse proxy rewrites preserved intact.
@@ -29,11 +29,11 @@ The platform has been successfully transformed from an enterprise invite-only mo
 
 | Test Suite | Purpose | Tests | Result | Status |
 |---|---|:---:|:---:|:---:|
-| `test_public_registration_and_social.py` | Public signup, email verification, social OAuth, feed/report isolation, quotas, killswitch, and Demo Analyst RBAC | 27 | 27 / 27 PASS | 🟢 PASSED |
+| `test_public_registration_and_social.py` | Public signup, immediate login, social OAuth, feed/report isolation, quotas, killswitch, and Demo Analyst RBAC | 30 | 30 / 30 PASS | 🟢 PASSED |
 | `test_auth_rbac.py` | Enterprise sessions, Argon2id, CSRF, admin access, audit immutability, OAuth headers | 29 | 29 / 29 PASS | 🟢 PASSED |
 | `test_api_endpoints.py` | Business logic, coverage matrix, feeds ingest, SSRF protection, RAG diagnostics | 6 | 6 / 6 PASS | 🟢 PASSED |
-| **Total Automated Tests** | **Comprehensive Regression & Feature Testing** | **62** | **62 / 62 PASS (100%)** | 🟢 **ALL PASS** |
-| **Frontend Production Build** | Vite 5.4.21 bundle compilation (CSS/JS chunks, JSX routing) | 2,386 modules | Built in 3.96s, 0 errors | 🟢 **PASSED** |
+| **Total Automated Tests** | **Comprehensive Regression & Feature Testing** | **65** | **65 / 65 PASS (100%)** | 🟢 **ALL PASS** |
+| **Frontend Production Build** | Vite 5.4.21 bundle compilation (CSS/JS chunks, JSX routing) | 2,386 modules | Built in 3.98s, 0 errors | 🟢 **PASSED** |
 
 ---
 
@@ -49,17 +49,19 @@ The platform has been successfully transformed from an enterprise invite-only mo
 - [x] Passwords hashed strictly using Argon2id (`m=65536`, `t=2`, `p=2`).
 - [x] Plaintext passwords never stored in database or logs.
 - [x] Public registration automatically assigns `Demo Analyst` role.
+- [x] Account activated (`is_active=True`) immediately upon registration.
 - [x] Role tampering prevented: user-supplied roles in registration requests are rejected/ignored.
 - [x] Self-registration never grants `Admin` or `Security Analyst` privileges.
 - [x] Registration endpoint rate-limited to 5 requests per minute per IP address (`registration_rate_limiter`).
+- [x] User can log in immediately after registration without SMTP or email verification dependencies.
 
-### B. Email Verification & Activation
-- [x] Cryptographically secure 32-byte URL-safe verification token generation.
+### B. Email Verification & Immediate Access Model
+- [x] Traditional registration grants immediate active status without mandatory verification blocker.
+- [x] Unverified email state accurately preserved (`is_verified=False`) without false claims of cryptographic verification.
+- [x] Cryptographically secure 32-byte URL-safe verification token generation available for optional verification flows.
 - [x] Verification tokens hashed using SHA-256 before PostgreSQL storage (`email_verification_tokens`).
 - [x] 30-minute token expiration window enforced (`EMAIL_VERIFICATION_EXPIRE_MINUTES`).
-- [x] Configurable email delivery provider (`console`, `smtp`, `mock`).
-- [x] Account activated (`is_verified=True`) only upon valid token submission.
-- [x] Unverified accounts blocked from login with informative error message (HTTP 403 Forbidden).
+- [x] Inactive accounts (`is_active=False`) remain blocked from login (HTTP 403 Forbidden).
 - [x] Reused verification tokens rejected (HTTP 400 Bad Request) with atomic row locking (`with_for_update()`).
 - [x] Expired verification tokens rejected (HTTP 400 Bad Request).
 - [x] Verification endpoints (`POST /verify-email`, `GET /verify-email`) protected against brute-force token guessing (10 attempts/min rate limit).
@@ -117,7 +119,7 @@ The platform has been successfully transformed from an enterprise invite-only mo
 
 ### Overall Assessment: 🟢 **GO FOR STAGING DEPLOYMENT**
 
-The system meets all security, functional, architectural, cost-protection, and multi-tenant isolation criteria. All 62 automated tests pass with 100% success rate, the frontend compiles cleanly, and no destructive production operations were performed.
+The system meets all security, functional, architectural, cost-protection, and multi-tenant isolation criteria. All 65 automated tests pass with 100% success rate, the frontend compiles cleanly, and no destructive production operations were performed.
 
 ### Pre-Flight Staging Checklist:
 1. Ensure `EMAIL_PROVIDER=console` or `smtp` is configured in the staging environment.

@@ -28,7 +28,6 @@ export const Register = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
   const [successMsg, setSuccessMsg] = useState(null);
-  const [devToken, setDevToken] = useState(null);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -81,10 +80,10 @@ export const Register = () => {
         confirm_password: confirmPassword,
       });
 
-      setSuccessMsg(res.message || 'Account created successfully! Please check your email for the verification link.');
-      if (res.token) {
-        setDevToken(res.token);
-      }
+      setSuccessMsg(res.message || 'Your account has been created successfully. You can now log in.');
+      setTimeout(() => {
+        navigate(`/login?registered=true&email=${encodeURIComponent(email)}`);
+      }, 1500);
     } catch (err) {
       const detail = err.response?.data?.detail;
       if (Array.isArray(detail)) {
@@ -130,19 +129,9 @@ export const Register = () => {
             <CheckCircle2 size={18} className="login-alert-icon" style={{ color: '#4ade80' }} />
             <div className="login-alert-text">
               <div>{successMsg}</div>
-              {devToken && (
-                <div style={{ marginTop: '8px', fontSize: '12px' }}>
-                  <Link
-                    to={`/verify-email?token=${devToken}`}
-                    style={{ color: 'var(--accent-cyan)', textDecoration: 'underline' }}
-                  >
-                    Quick verify demo link &rarr;
-                  </Link>
-                </div>
-              )}
               <div style={{ marginTop: '12px' }}>
                 <Link
-                  to="/login"
+                  to={`/login?registered=true&email=${encodeURIComponent(email)}`}
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
