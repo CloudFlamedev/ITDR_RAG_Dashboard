@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { apiClient } from '../api/client';
+import { apiClient, getApiBase } from '../api/client';
 import {
   UserPlus,
   ShieldCheck,
@@ -97,8 +97,7 @@ export const Register = () => {
   };
 
   const handleOAuthLogin = (provider) => {
-    const rawApiBase = import.meta.env.VITE_API_URL || '';
-    const apiBase = rawApiBase.endsWith('/') ? rawApiBase.slice(0, -1) : rawApiBase;
+    const apiBase = getApiBase();
     window.location.href = `${apiBase}/api/auth/oauth/${provider}/login`;
   };
 

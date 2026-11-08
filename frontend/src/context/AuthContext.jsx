@@ -32,6 +32,8 @@ export const AuthProvider = ({ children }) => {
     // Listen for session expiration events dispatched by Axios interceptor
     const handleSessionExpired = () => {
       setUser(null);
+      sessionStorage.removeItem('itdr_csrf');
+      sessionStorage.removeItem('itdr_token');
     };
 
     window.addEventListener('itdr:session-expired', handleSessionExpired);
@@ -67,6 +69,7 @@ export const AuthProvider = ({ children }) => {
     } finally {
       setUser(null);
       sessionStorage.removeItem('itdr_csrf');
+      sessionStorage.removeItem('itdr_token');
     }
   };
 

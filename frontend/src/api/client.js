@@ -1,7 +1,19 @@
 import axios from 'axios';
 
-const rawApiBase = import.meta.env.VITE_API_URL || '';
-const apiBase = rawApiBase.endsWith('/') ? rawApiBase.slice(0, -1) : rawApiBase;
+export function getApiBase() {
+  if (typeof window !== 'undefined') {
+    const hostname = window.location.hostname;
+    // On Vercel, localhost, or 127.0.0.1, always use relative paths ('')
+    // so requests flow through the same-origin reverse proxy.
+    // This ensures HttpOnly session and CSRF cookies are strictly first-party,
+    // preventing modern browsers (Chrome/Safari) from blocking cookies due to cross-site SameSite restrictions.
+    if (hostname.includes('vercel.app') || hostname === 'localhost' || hostname === '127.0.0.1') {
+      return '';
+    }
+  }
+  const rawApiBase = import.meta.env.VITE_API_URL || '';
+  return rawApiBase.endsWith('/') ? rawApiBase.slice(0, -1) : rawApiBase;
+}
 
 export function getCookie(name) {
   if (typeof document === 'undefined') return null;
@@ -10,7 +22,7 @@ export function getCookie(name) {
 }
 
 const api = axios.create({
-  baseURL: apiBase,
+  baseURL: getApiBase(),
   headers: {
     'Content-Type': 'application/json',
   },
@@ -18,9 +30,18 @@ const api = axios.create({
   timeout: 120000,
 });
 
-// Request Interceptor: Attach CSRF Token on mutating HTTP requests
+// Request Interceptor: Attach CSRF Token and Bearer Token on HTTP requests
 api.interceptors.request.use(
   (config) => {
+    config.baseURL = getApiBase();
+
+    // 1. Attach Bearer token fallback if present in session/local storage
+    const token = sessionStorage.getItem('itdr_token') || localStorage.getItem('itdr_token');
+    if (token && !config.headers['Authorization']) {
+      config.headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    // 2. Attach CSRF Token on mutating HTTP requests
     const method = (config.method || '').toUpperCase();
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
       const csrfToken = getCookie('itdr_csrf') || sessionStorage.getItem('itdr_csrf');
@@ -33,9 +54,12 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// Response Interceptor: Automatically store fresh CSRF tokens and broadcast session expiration
+// Response Interceptor: Automatically store fresh CSRF/Bearer tokens and broadcast session expiration
 api.interceptors.response.use(
   (response) => {
+    if (response?.data?.token) {
+      sessionStorage.setItem('itdr_token', response.data.token);
+    }
     if (response?.data?.csrf_token) {
       sessionStorage.setItem('itdr_csrf', response.data.csrf_token);
     }
@@ -44,8 +68,15 @@ api.interceptors.response.use(
   (error) => {
     if (error.response && error.response.status === 401) {
       const url = error.config?.url || '';
-      // Avoid redirect looping when checking /api/auth/login or /api/auth/me during initial boot
-      if (!url.includes('/api/auth/login')) {
+      // Avoid redirect looping or premature logout when checking non-critical endpoints or initial boot
+      const isExempt =
+        url.includes('/api/auth/login') ||
+        url.includes('/api/auth/me') ||
+        url.includes('/api/system/status') ||
+        url.includes('/health');
+      if (!isExempt) {
+        sessionStorage.removeItem('itdr_token');
+        sessionStorage.removeItem('itdr_csrf');
         window.dispatchEvent(new CustomEvent('itdr:session-expired'));
       }
     }
@@ -56,13 +87,32 @@ api.interceptors.response.use(
 // Centralized API client methods
 export const apiClient = {
   // Authentication & Session
-  login: (email, password) => api.post('/api/auth/login', { email, password }).then((r) => r.data),
+  login: (email, password) =>
+    api.post('/api/auth/login?include_token=true', { email, password }).then((r) => {
+      if (r.data?.token) {
+        sessionStorage.setItem('itdr_token', r.data.token);
+      }
+      if (r.data?.csrf_token) {
+        sessionStorage.setItem('itdr_csrf', r.data.csrf_token);
+      }
+      return r.data;
+    }),
   register: (payload) => api.post('/api/auth/register', payload).then((r) => r.data),
   verifyEmail: (token) => api.post('/api/auth/verify-email', { token }).then((r) => r.data),
   resendVerification: (email) => api.post('/api/auth/resend-verification', { email }).then((r) => r.data),
-  logout: () => api.post('/api/auth/logout').then((r) => r.data),
+  logout: () =>
+    api.post('/api/auth/logout').then((r) => {
+      sessionStorage.removeItem('itdr_token');
+      sessionStorage.removeItem('itdr_csrf');
+      return r.data;
+    }).catch((err) => {
+      sessionStorage.removeItem('itdr_token');
+      sessionStorage.removeItem('itdr_csrf');
+      throw err;
+    }),
   getMe: () => api.get('/api/auth/me').then((r) => r.data),
   getCsrf: () => api.get('/api/auth/csrf').then((r) => r.data),
+  getLiveness: () => api.get('/health').then((r) => r.data),
 
   // User Management (Admin only)
   getUsers: (params = {}) => api.get('/api/users', { params }).then((r) => r.data),

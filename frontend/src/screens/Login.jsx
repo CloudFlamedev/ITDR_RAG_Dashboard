@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation, useSearchParams, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { apiClient } from '../api/client';
+import { apiClient, getApiBase } from '../api/client';
 import {
   ShieldAlert,
   ShieldCheck,
@@ -59,8 +59,7 @@ export const Login = () => {
   };
 
   const handleOAuthLogin = (provider) => {
-    const rawApiBase = import.meta.env.VITE_API_URL || '';
-    const apiBase = rawApiBase.endsWith('/') ? rawApiBase.slice(0, -1) : rawApiBase;
+    const apiBase = getApiBase();
     window.location.href = `${apiBase}/api/auth/oauth/${provider}/login`;
   };
 
