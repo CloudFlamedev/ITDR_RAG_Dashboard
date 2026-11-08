@@ -1,6 +1,7 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { useFilters } from '../context/FilterContext';
+import { useAuth } from '../context/AuthContext';
 import {
   ShieldAlert,
   ShieldCheck,
@@ -10,11 +11,15 @@ import {
   Rss,
   Terminal,
   FileText,
+  Users,
+  LogOut,
   X,
+  User,
 } from 'lucide-react';
 
 export const Sidebar = () => {
   const { sidebarOpen, closeSidebar } = useFilters();
+  const { user, logout, hasPermission, isAdmin } = useAuth();
 
   return (
     <>
@@ -52,7 +57,7 @@ export const Sidebar = () => {
         </div>
 
         {/* Navigation Links */}
-        <nav className="sidebar-nav">
+        <nav className="sidebar-nav" style={{ flex: 1 }}>
           {/* SECTION 1 */}
           <div className="nav-section-title">Identity Threat Insights</div>
 
@@ -124,7 +129,59 @@ export const Sidebar = () => {
             <FileText size={16} />
             <span>Completed Intelligence Reports</span>
           </NavLink>
+
+          {/* SECTION 3: ADMIN ONLY */}
+          {(isAdmin || hasPermission('users:manage')) && (
+            <>
+              <div className="nav-section-title" style={{ marginTop: '24px' }}>
+                Identity Governance & Access
+              </div>
+
+              <NavLink
+                to="/users"
+                className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+                onClick={closeSidebar}
+              >
+                <Users size={16} />
+                <span>User Management & Audit</span>
+              </NavLink>
+            </>
+          )}
         </nav>
+
+        {/* User Profile & Logout Footer */}
+        {user && (
+          <div className="sidebar-user-footer">
+            <div className="user-profile-info">
+              <div className="user-avatar-circle">
+                <User size={16} />
+              </div>
+              <div className="user-text-meta">
+                <div className="user-name-label">{user.full_name || 'Operator'}</div>
+                <div className="user-email-label">{user.email}</div>
+                <div className="user-roles-chips">
+                  {user.roles?.map((role) => (
+                    <span
+                      key={role}
+                      className={`role-badge role-badge-${role.toLowerCase().replace(' ', '-')}`}
+                    >
+                      {role}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <button
+              onClick={logout}
+              className="user-logout-btn"
+              title="Terminate encrypted SOC session"
+              aria-label="Logout"
+            >
+              <LogOut size={16} />
+            </button>
+          </div>
+        )}
       </aside>
     </>
   );

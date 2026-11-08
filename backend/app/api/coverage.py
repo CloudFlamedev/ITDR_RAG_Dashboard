@@ -3,6 +3,8 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.services.coverage_service import CoverageService
+from app.models.auth import User
+from app.api.deps import require_permission
 
 router = APIRouter(tags=["Coverage Matrix"])
 
@@ -15,6 +17,7 @@ def get_coverage_matrix(
     client_restriction: str = Query(default="ALL"),
     itdr_scope: str = Query(default="ITDR Scope Only"),
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("matrix:read")),
 ):
     """
     Screen 2: ITDR Coverage Matrix.
@@ -34,6 +37,7 @@ def get_coverage_matrix(
 def get_ttp_detail(
     technique_id: str = Query(..., description="MITRE Technique ID e.g. T1078"),
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("matrix:read")),
 ):
     """
     Screen 2: Technique Detail Drawer modal.

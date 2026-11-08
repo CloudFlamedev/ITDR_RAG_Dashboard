@@ -9,6 +9,8 @@ from app.models.attack import AttackTechnique, AttackTactic
 from app.models.d3fend import D3fendTechnique
 from app.models.coverage import DetectionRule
 from app.models.rag import RagDocument
+from app.models.auth import User
+from app.api.deps import require_permission
 
 router = APIRouter(tags=["Health & Telemetry"])
 settings = get_settings()
@@ -16,7 +18,7 @@ settings = get_settings()
 
 @router.get("/health")
 def get_liveness() -> Dict[str, Any]:
-    """Lightweight liveness check for orchestrators and container health probes."""
+    """Lightweight public liveness check for orchestrators and container health probes."""
     return {
         "status": "healthy",
         "service": "itdr-platform-api",
@@ -26,9 +28,12 @@ def get_liveness() -> Dict[str, Any]:
 
 
 @router.get("/api/system/status")
-def get_system_status(db: Session = Depends(get_db)) -> Dict[str, Any]:
+def get_system_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("system:status")),
+) -> Dict[str, Any]:
     """
-    Comprehensive multi-subsystem heartbeat telemetry.
+    Comprehensive multi-subsystem heartbeat telemetry (Protected: system:status).
     Checks Neon/PostgreSQL database, pgvector extension, Grok/xAI API readiness,
     Hugging Face inference embedding readiness, and knowledge base index volume.
     """

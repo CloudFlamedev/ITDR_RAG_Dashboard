@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import apiClient from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import MetricCard from '../components/MetricCard';
 import { Rss, PlusCircle, Search, RefreshCw, ExternalLink, ArrowRight, ShieldAlert } from 'lucide-react';
 
 export const ThreatFeeds = () => {
   const navigate = useNavigate();
+  const { hasPermission } = useAuth();
   const [data, setData] = useState(null);
   const [sources, setSources] = useState(null);
   const [statusFilter, setStatusFilter] = useState('ALL');
@@ -94,7 +96,12 @@ export const ThreatFeeds = () => {
             <RefreshCw size={15} />
             <span>Sync Now</span>
           </button>
-          <button className="btn btn-primary" onClick={() => setIsModalOpen(true)}>
+          <button
+            className="btn btn-primary"
+            onClick={() => setIsModalOpen(true)}
+            disabled={!hasPermission('feeds:ingest')}
+            title={!hasPermission('feeds:ingest') ? 'Requires Security Analyst or Admin role' : 'Ingest custom threat advisory'}
+          >
             <PlusCircle size={15} />
             <span>Ingest Advisory</span>
           </button>

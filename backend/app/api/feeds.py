@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.feeds import ThreatFeed
+from app.models.auth import User
+from app.api.deps import require_permission, verify_csrf
 
 router = APIRouter(tags=["Threat Intelligence Feeds & Bulletins"])
 
@@ -53,6 +55,7 @@ def get_bulletins(
     limit: int = Query(default=30, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("feeds:read")),
 ):
     """
     Screens 5 & 7: Searchable and filterable threat intelligence bulletins and completed reports.
@@ -108,7 +111,10 @@ def get_bulletins(
 
 
 @router.get("/api/identity/feeds")
-def get_feed_sources(db: Session = Depends(get_db)):
+def get_feed_sources(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("feeds:read")),
+):
     """
     Screen 5: Threat intelligence feed status, active connectors, and sync telemetry.
     """
@@ -135,6 +141,8 @@ def get_feed_sources(db: Session = Depends(get_db)):
 def ingest_threat_feed(
     req: FeedIngestRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("feeds:ingest")),
+    _csrf: None = Depends(verify_csrf),
 ):
     """
     Screen 5: Validates and ingests a custom CTI advisory or threat intelligence bulletin.

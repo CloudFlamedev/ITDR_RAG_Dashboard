@@ -9,6 +9,8 @@ from app.api.coverage import router as coverage_router
 from app.api.feeds import router as feeds_router
 from app.api.threats import router as threats_router
 from app.api.rag import router as rag_router
+from app.api.auth import router as auth_router
+from app.api.users import router as users_router
 
 settings = get_settings()
 
@@ -26,25 +28,36 @@ async def lifespan(app: FastAPI):
     yield
 
 
+docs_url = None if settings.is_production else "/docs"
+redoc_url = None if settings.is_production else "/redoc"
+openapi_url = None if settings.is_production else "/openapi.json"
+
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description="Identity Threat Detection & Response (ITDR) Platform with Grok, Hugging Face Embeddings, Neon pgvector, and Explainable RAG / GenAI Layer",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url=docs_url,
+    redoc_url=redoc_url,
+    openapi_url=openapi_url,
     lifespan=lifespan,
 )
 
-# Enable CORS for local Vite development and production origins
+# Enable CORS for exact origins with credentials support (no wildcard origins)
+origins = settings.cors_origins
+logger.info(f"Configuring CORS for origins: {origins}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "X-Requested-With", "Accept"],
+    expose_headers=["Retry-After"],
 )
 
 # Mount Routers
+app.include_router(auth_router)
+app.include_router(users_router)
 app.include_router(health_router)
 app.include_router(reports_router)
 app.include_router(coverage_router)
@@ -65,4 +78,3 @@ def get_root():
         "health": "/health",
         "telemetry": "/api/system/status",
     }
-

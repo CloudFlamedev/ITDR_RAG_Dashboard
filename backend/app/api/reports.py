@@ -3,6 +3,8 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.services.dashboard_service import DashboardService
+from app.models.auth import User
+from app.api.deps import require_permission
 
 router = APIRouter(prefix="/api/reports", tags=["ITDR Strategic Posture Reports"])
 
@@ -13,6 +15,7 @@ def get_identity_resilience(
     itdr_scope: str = Query(default="ITDR Scope Only", description="ALL, ITDR Scope Only, Non-ITDR"),
     view_mode: str = Query(default="ClientReq", description="ClientReq, MVP1, MVP2, MVP3"),
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("dashboard:read")),
 ):
     """
     Screen 1: Identity Resilience Dashboard.
@@ -32,6 +35,7 @@ def get_threat_exposure(
     client_restriction: str = Query(default="ALL"),
     itdr_scope: str = Query(default="ITDR Scope Only"),
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("dashboard:read")),
 ):
     """
     Screen 3: Identity Threat Exposure.
@@ -49,6 +53,7 @@ def get_threat_scenarios(
     client_restriction: str = Query(default="ALL"),
     itdr_scope: str = Query(default="ITDR Scope Only"),
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("dashboard:read")),
 ):
     """
     Screen 4: Identity Threat Scenarios.

@@ -27,6 +27,16 @@ from app.models.threat_report import (
     AnalysisCitation,
     AnalysisTraceStep,
 )
+from app.models.auth import (
+    User,
+    Role,
+    Permission,
+    UserRole,
+    RolePermission,
+    AuthIdentity,
+    UserSession,
+    AuditLog,
+)
 
 __all__ = [
     "Base",
@@ -46,4 +56,12 @@ __all__ = [
     "ThreatAnalysisReport",
     "AnalysisCitation",
     "AnalysisTraceStep",
+    "User",
+    "Role",
+    "Permission",
+    "UserRole",
+    "RolePermission",
+    "AuthIdentity",
+    "UserSession",
+    "AuditLog",
 ]

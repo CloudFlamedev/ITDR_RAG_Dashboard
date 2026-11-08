@@ -148,26 +148,28 @@ flowchart LR
 
 ## Features
 
-The frontend implements seven dashboard screens:
+The frontend implements eight dashboard screens and enterprise security controls:
 
 1. **Identity Resilience Dashboard** — coverage KPIs, tactic exposure, resilience visualization, and potential blind spots.
 2. **ITDR Coverage Matrix** — identity/enterprise views, filters, mapped rules, and technique details.
 3. **Identity Threat Exposure** — techniques grouped by attack phase and coverage status.
 4. **Identity Threat Scenarios** — sample multi-stage scenarios and resilience indicators.
-5. **Threat Intelligence Feeds** — bulletin listing and advisory ingestion.
-6. **Threat Modeling Workspace** — advisory input, model options, workflow trace, report, and citations.
+5. **Threat Intelligence Feeds** — bulletin listing and advisory ingestion (RBAC gated: `feeds:ingest`).
+6. **Threat Modeling Workspace** — advisory input, model options, workflow trace, report, and citations (RBAC gated: `threats:analyze`).
 7. **Completed Intelligence Reports** — saved reports, detail view, and JSON/Markdown export.
+8. **Identity Governance & Access (Admin)** — user provisioning, role assignments, account deactivation, and security audit trail review.
 
-Backend capabilities include:
+Enterprise Authentication & RBAC capabilities:
 
-- FastAPI routes with Pydantic request and response models.
-- SQLAlchemy ORM models and Alembic schema migration.
-- MITRE ATT&CK STIX and D3FEND ingestion services.
-- Document construction with source metadata and SHA-256 content hashes.
-- Hugging Face / Jina embedding generation and vector retrieval through PostgreSQL/pgvector.
-- LangGraph stateful threat-analysis workflow with observable trace steps.
-- Detection-rule coverage and report persistence.
-- Health endpoints and API documentation.
+- **Zero-Trust Default-Deny Architecture**: All operational API endpoints require authenticated sessions and verified permissions.
+- **Enterprise Password Authentication**: Argon2id password hashing with timing-attack resistant dummy calculations and sliding window rate limiting.
+- **Social Login / Single Sign-On**: Google OpenID Connect (OIDC with RFC 7636 PKCE S256) and GitHub OAuth 2.0 with verified primary email enforcement.
+- **Server-Managed Session Store**: Stateful sessions in Neon PostgreSQL (`user_sessions` with SHA-256 token hashing), `HttpOnly` + `Secure` + `SameSite=Lax` cookies, sliding inactivity expiration (30 mins), and absolute expiration (12 hrs).
+- **HMAC CSRF Defense**: Double-submit cookie + HMAC-SHA256 signed CSRF tokens on all mutating HTTP methods (`POST`, `PUT`, `PATCH`, `DELETE`).
+- **3-Tier RBAC**: `Admin` (full access & user governance), `Security Analyst` (threat modeling & feed ingestion), and `Viewer` (read-only dashboards & reports).
+- **Immutable Security Audit Trail**: Comprehensive logging of logins, throttles, identity linkages, and user management events in `audit_logs`.
+- **Admin Bootstrap CLI**: Secure provisioning utility (`backend/scripts/bootstrap_admin.py`) for initial administrative setup.
+- **Complete Documentation**: Full security reference available in [`docs/AUTHENTICATION_AUTHORIZATION.md`](docs/AUTHENTICATION_AUTHORIZATION.md).
 
 ## Technology stack
 

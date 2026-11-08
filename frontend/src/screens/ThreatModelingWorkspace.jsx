@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useFilters } from '../context/FilterContext';
+import { useAuth } from '../context/AuthContext';
 import apiClient from '../api/client';
 import TraceStepper from '../components/TraceStepper';
 import {
@@ -23,6 +24,7 @@ export const ThreatModelingWorkspace = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const { viewMode, clientRestriction, itdrScope, systemStatus } = useFilters();
+  const { hasPermission, isViewer } = useAuth();
 
   // 3-Step Journey: 1 = Input Advisory, 2 = Model Options, 3 = Telemetry & Report
   const [activeStep, setActiveStep] = useState(1);
@@ -394,10 +396,23 @@ ${analysisResult.citations?.map(cit => `- [${cit.external_id}] (${cit.citation_r
               <ArrowLeft size={14} />
               <span>Back to Input</span>
             </button>
-            <button className="btn btn-primary" onClick={handleStartAnalysis}>
-              <Play size={14} />
-              <span>Launch Threat Analysis Workflow</span>
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              {!hasPermission('threats:analyze') && (
+                <span style={{ fontSize: '12px', color: 'var(--accent-warning)', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                  <AlertTriangle size={14} />
+                  <span>Viewer Role: Analysis execution restricted to Security Analysts / Admins</span>
+                </span>
+              )}
+              <button
+                className="btn btn-primary"
+                onClick={handleStartAnalysis}
+                disabled={!hasPermission('threats:analyze')}
+                title={!hasPermission('threats:analyze') ? 'Requires Security Analyst or Admin role' : 'Execute LangGraph workflow'}
+              >
+                <Play size={14} />
+                <span>Launch Threat Analysis Workflow</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

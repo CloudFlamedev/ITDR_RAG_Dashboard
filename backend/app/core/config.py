@@ -57,6 +57,54 @@ class Settings(BaseSettings):
     ATTACK_STIX_FILE: str = Field(default="./data/enterprise-attack.json", description="Path to MITRE ATT&CK STIX 2.1 JSON")
     D3FEND_FILE: str = Field(default="./data/d3fend.json", description="Path to MITRE D3FEND ontology JSON")
 
+    # Authentication & Session Management Configuration
+    SESSION_SECRET_KEY: str = Field(
+        default="itdr-insecure-dev-session-secret-key-change-in-production-32chars",
+        description="HMAC secret key for signing CSRF tokens and OAuth state"
+    )
+    SESSION_EXPIRE_MINUTES: int = Field(default=720, description="Absolute maximum session lifetime in minutes (12 hours)")
+    SESSION_INACTIVITY_MINUTES: int = Field(default=30, description="Inactivity session timeout in minutes (30 minutes)")
+    SESSION_COOKIE_NAME: str = Field(default="itdr_session", description="Name of the HTTP-only session cookie")
+    SESSION_COOKIE_SECURE: bool = Field(default=False, description="Set Secure flag on cookies (True in production HTTPS)")
+    SESSION_COOKIE_SAMESITE: str = Field(default="lax", description="SameSite policy for session cookie (lax or none)")
+    CSRF_COOKIE_NAME: str = Field(default="itdr_csrf", description="Name of the readable CSRF cookie for double-submit protection")
+
+    # Frontend and CORS URLs
+    FRONTEND_URL: str = Field(default="http://localhost:5173", description="Origin URL of the frontend application")
+    CORS_ORIGIN_WHITELIST: str = Field(
+        default="http://localhost:5173,http://127.0.0.1:5173,https://itdr-rag-dashboard.vercel.app",
+        description="Comma-separated list of allowed CORS origins"
+    )
+
+    # Social Login / OAuth Configuration
+    GOOGLE_CLIENT_ID: Optional[str] = Field(default=None, description="Google OAuth 2.0 / OIDC Client ID")
+    GOOGLE_CLIENT_SECRET: Optional[str] = Field(default=None, description="Google OAuth 2.0 Client Secret")
+    GOOGLE_REDIRECT_URI: Optional[str] = Field(default=None, description="Google OAuth authorized redirect URI")
+
+    GITHUB_CLIENT_ID: Optional[str] = Field(default=None, description="GitHub OAuth App Client ID")
+    GITHUB_CLIENT_SECRET: Optional[str] = Field(default=None, description="GitHub OAuth App Client Secret")
+    GITHUB_REDIRECT_URI: Optional[str] = Field(default=None, description="GitHub OAuth authorized redirect URI")
+
+    # Security Policies
+    ALLOW_OAUTH_AUTO_REGISTRATION: bool = Field(
+        default=False,
+        description="Whether unprovisioned OAuth users are auto-registered as Viewers (default False: require admin pre-provisioning)"
+    )
+    RATE_LIMIT_LOGIN_ATTEMPTS: int = Field(default=5, description="Max failed login attempts before temporary throttling")
+    RATE_LIMIT_WINDOW_SECONDS: int = Field(default=60, description="Window in seconds for login rate limiting")
+    REDIS_URL: Optional[str] = Field(
+        default=None,
+        description="Redis connection URL for distributed sliding-window rate limiting across multiple backend instances"
+    )
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """Returns parsed list of allowed CORS origins, automatically including FRONTEND_URL."""
+        origins = [o.strip() for o in self.CORS_ORIGIN_WHITELIST.split(",") if o.strip()]
+        if self.FRONTEND_URL and self.FRONTEND_URL.strip() not in origins:
+            origins.append(self.FRONTEND_URL.strip())
+        return list(dict.fromkeys(origins))
+
     @property
     def normalized_database_url(self) -> str:
         """Ensure database URL is formatted with the modern postgresql+psycopg driver."""
@@ -99,6 +147,11 @@ class Settings(BaseSettings):
     def effective_llm_model(self) -> str:
         """Returns model name for LLM calls."""
         return self.XAI_MODEL or self.GROQ_MODEL or "grok-4.7"
+
+    @property
+    def is_production(self) -> bool:
+        """Returns True if the application is running in production mode."""
+        return self.APP_ENV.lower() in ("production", "prod")
 
     @property
     def has_xai_key(self) -> bool:

@@ -7,6 +7,8 @@ from app.services.retrieval_service import RetrievalService
 from app.services.embedding_service import EmbeddingService
 from app.services.vector_store_service import VectorStoreService
 from app.core.config import get_settings
+from app.models.auth import User
+from app.api.deps import require_permission
 
 router = APIRouter(prefix="/api/rag", tags=["RAG & Vector Retrieval"])
 settings = get_settings()
@@ -33,10 +35,12 @@ class RagSearchResponse(BaseModel):
 def search_rag_knowledge(
     req: RagSearchRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("rag:search")),
 ):
     """
     Transparent retrieval-only endpoint for debugging and inspecting candidate
     ATT&CK techniques and D3FEND defensive countermeasures before LLM generation.
+    Protected: rag:search.
     """
     retriever = RetrievalService(db)
     results = retriever.retrieve(
@@ -48,10 +52,13 @@ def search_rag_knowledge(
 
 
 @router.get("/health")
-def get_rag_health(db: Session = Depends(get_db)):
+def get_rag_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("rag:read")),
+):
     """
     Diagnostics endpoint verifying embedding provider, pgvector storage state,
-    and dimension consistency.
+    and dimension consistency. Protected: rag:read.
     """
     embed_svc = EmbeddingService()
     connectivity = embed_svc.test_connectivity()

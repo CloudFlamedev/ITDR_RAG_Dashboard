@@ -1,6 +1,7 @@
 import React from 'react';
 import { useFilters } from '../context/FilterContext';
-import { Sun, Moon, Database, Cpu, Sparkles, Layers, Activity, Menu } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
+import { Sun, Moon, Database, Cpu, Sparkles, Layers, Activity, Menu, Shield } from 'lucide-react';
 
 export const TopBar = () => {
   const {
@@ -15,6 +16,7 @@ export const TopBar = () => {
     systemStatus,
     toggleSidebar,
   } = useFilters();
+  const { user } = useAuth();
 
   const dbStatus = systemStatus?.subsystems?.database?.status === 'Online';
   const pgvectorStatus = systemStatus?.subsystems?.pgvector?.enabled;
@@ -76,6 +78,16 @@ export const TopBar = () => {
       <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
         {/* Heartbeat Status Indicators */}
         <div className="heartbeat-strip">
+          {/* User Role Indicator */}
+          {user && (
+            <div className="status-pill" title={`Logged in as ${user.email}`}>
+              <Shield size={12} color="var(--accent-cyan)" />
+              <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>
+                {user.roles?.[0] || 'User'}
+              </span>
+            </div>
+          )}
+
           {/* Database */}
           <div className="status-pill" title={`PostgreSQL: ${systemStatus?.subsystems?.database?.version || 'Connected'}`}>
             <span className={`status-dot ${dbStatus ? 'dot-green' : 'dot-red'}`} />

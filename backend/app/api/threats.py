@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.ai.graph import threat_analysis_app
 from app.models.threat_report import ThreatAnalysisReport, AnalysisCitation, AnalysisTraceStep
+from app.models.auth import User
+from app.api.deps import require_permission, verify_csrf
 
 router = APIRouter(prefix="/api/threats", tags=["Threat Modeling & GenAI Analysis"])
 
@@ -72,7 +74,9 @@ class ThreatAnalysisRequest(BaseModel):
 
 
 @router.get("/samples")
-def get_sample_threat_inputs():
+def get_sample_threat_inputs(
+    current_user: User = Depends(require_permission("threats:read")),
+):
     """Returns curated threat advisory inputs for the Threat Modeling Workspace."""
     return SAMPLES
 
@@ -81,6 +85,8 @@ def get_sample_threat_inputs():
 def analyze_threat(
     req: ThreatAnalysisRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("threats:analyze")),
+    _csrf: None = Depends(verify_csrf),
 ):
     """
     Executes the 11-node stateful LangGraph threat analysis workflow.
@@ -134,6 +140,7 @@ def list_reports(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("threats:read")),
 ):
     """Lists completed threat intelligence reports with pagination and filtering."""
     query = db.query(ThreatAnalysisReport)
@@ -174,6 +181,7 @@ def list_reports(
 def get_report_detail(
     report_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("threats:read")),
 ):
     """Retrieves full report brief with evidence citations and execution trace steps."""
     rep = db.query(ThreatAnalysisReport).filter(
