@@ -61,6 +61,15 @@ def get_bulletins(
     Screens 5 & 7: Searchable and filterable threat intelligence bulletins and completed reports.
     """
     query = db.query(ThreatFeed)
+
+    # Multi-tenant isolation: non-admins only see their own feeds, shared demo feeds, or system feeds
+    if not current_user.has_role("Admin"):
+        query = query.filter(
+            (ThreatFeed.created_by_user_id == current_user.id) |
+            (ThreatFeed.created_by_user_id.is_(None)) |
+            (ThreatFeed.is_demo.is_(True))
+        )
+
     if status and status.upper() != "ALL":
         query = query.filter(ThreatFeed.status.ilike(status))
     if search:
@@ -73,11 +82,20 @@ def get_bulletins(
     total = query.count()
     records = query.order_by(ThreatFeed.published_at.desc().nullslast()).offset(offset).limit(limit).all()
 
-    # KPI counts
-    total_count = db.query(ThreatFeed).count()
-    new_count = db.query(ThreatFeed).filter(ThreatFeed.status.ilike("New")).count()
-    analyzed_count = db.query(ThreatFeed).filter(ThreatFeed.status.ilike("Analyzed")).count()
-    review_count = db.query(ThreatFeed).filter(ThreatFeed.status.ilike("Review")).count()
+    # KPI counts scoped by ownership
+    if not current_user.has_role("Admin"):
+        base_kpi = db.query(ThreatFeed).filter(
+            (ThreatFeed.created_by_user_id == current_user.id) |
+            (ThreatFeed.created_by_user_id.is_(None)) |
+            (ThreatFeed.is_demo.is_(True))
+        )
+    else:
+        base_kpi = db.query(ThreatFeed)
+
+    total_count = base_kpi.count()
+    new_count = base_kpi.filter(ThreatFeed.status.ilike("New")).count()
+    analyzed_count = base_kpi.filter(ThreatFeed.status.ilike("Analyzed")).count()
+    review_count = base_kpi.filter(ThreatFeed.status.ilike("Review")).count()
 
     return {
         "kpis": {
@@ -104,9 +122,53 @@ def get_bulletins(
                 "url": b.url,
                 "description": b.description or b.content,
                 "is_demo": b.is_demo,
+                "created_by_user_id": b.created_by_user_id,
             }
             for b in records
         ]
+    }
+
+
+@router.get("/api/identity/bulletins/{bulletin_id}")
+def get_bulletin_detail(
+    bulletin_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("feeds:read")),
+):
+    """
+    Retrieves full bulletin details by bulletin_id or database id.
+    Enforces tenant ownership checks: non-admins cannot access other users' private feed records.
+    """
+    b = db.query(ThreatFeed).filter(
+        (ThreatFeed.bulletin_id == bulletin_id) |
+        (ThreatFeed.id == int(bulletin_id) if bulletin_id.isdigit() else False)
+    ).first()
+
+    if not b:
+        raise HTTPException(status_code=404, detail=f"Bulletin {bulletin_id} not found")
+
+    if not current_user.has_role("Admin"):
+        is_owner = (b.created_by_user_id == current_user.id)
+        is_shared = (b.created_by_user_id is None or b.is_demo)
+        if not is_owner and not is_shared:
+            raise HTTPException(status_code=404, detail=f"Bulletin {bulletin_id} not found")
+
+    return {
+        "id": b.id,
+        "bulletin_id": b.bulletin_id,
+        "title": b.title,
+        "source": b.source,
+        "status": b.status,
+        "severity": b.severity,
+        "published_at": b.published_at.isoformat() if b.published_at else None,
+        "ingested_at": b.ingested_at.isoformat() if b.ingested_at else None,
+        "related_ttps": b.related_ttps or [],
+        "threat_actors": b.threat_actors or [],
+        "url": b.url,
+        "description": b.description or b.content,
+        "content": b.content,
+        "is_demo": b.is_demo,
+        "created_by_user_id": b.created_by_user_id,
     }
 
 
@@ -128,7 +190,15 @@ def get_feed_sources(
         {"name": "Wiz Cloud Posture Feed", "type": "API Connector", "status": "Active", "frequency": "Daily", "items_ingested": 14},
     ]
 
-    total_feeds = db.query(ThreatFeed).count()
+    if not current_user.has_role("Admin"):
+        total_feeds = db.query(ThreatFeed).filter(
+            (ThreatFeed.created_by_user_id == current_user.id) |
+            (ThreatFeed.created_by_user_id.is_(None)) |
+            (ThreatFeed.is_demo.is_(True))
+        ).count()
+    else:
+        total_feeds = db.query(ThreatFeed).count()
+
     return {
         "total_active_feeds": len(sources),
         "total_bulletins_stored": total_feeds,
@@ -169,6 +239,7 @@ def ingest_threat_feed(
         related_ttps=found_ttps,
         severity=req.severity,
         is_demo=False,
+        created_by_user_id=current_user.id,
         raw_payload={"custom_ingest": True},
     )
 

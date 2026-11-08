@@ -57,6 +57,9 @@ api.interceptors.response.use(
 export const apiClient = {
   // Authentication & Session
   login: (email, password) => api.post('/api/auth/login', { email, password }).then((r) => r.data),
+  register: (payload) => api.post('/api/auth/register', payload).then((r) => r.data),
+  verifyEmail: (token) => api.post('/api/auth/verify-email', { token }).then((r) => r.data),
+  resendVerification: (email) => api.post('/api/auth/resend-verification', { email }).then((r) => r.data),
   logout: () => api.post('/api/auth/logout').then((r) => r.data),
   getMe: () => api.get('/api/auth/me').then((r) => r.data),
   getCsrf: () => api.get('/api/auth/csrf').then((r) => r.data),

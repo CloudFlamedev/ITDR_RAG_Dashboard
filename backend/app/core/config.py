@@ -85,11 +85,57 @@ class Settings(BaseSettings):
     GITHUB_CLIENT_SECRET: Optional[str] = Field(default=None, description="GitHub OAuth App Client Secret")
     GITHUB_REDIRECT_URI: Optional[str] = Field(default=None, description="GitHub OAuth authorized redirect URI")
 
-    # Security Policies
-    ALLOW_OAUTH_AUTO_REGISTRATION: bool = Field(
-        default=False,
-        description="Whether unprovisioned OAuth users are auto-registered as Viewers (default False: require admin pre-provisioning)"
+    # Public Registration & Social Sign-up Policies
+    PUBLIC_REGISTRATION_ENABLED: bool = Field(
+        default=True,
+        description="Whether public visitor registration is enabled"
     )
+    ALLOW_OAUTH_AUTO_REGISTRATION: bool = Field(
+        default=True,
+        description="Whether unprovisioned OAuth users are auto-registered with default role"
+    )
+    DEFAULT_REGISTRATION_ROLE: str = Field(
+        default="Demo Analyst",
+        description="Default role assigned to newly registered public users"
+    )
+
+    # Email Verification & Delivery
+    EMAIL_PROVIDER: str = Field(
+        default="console",
+        description="Email delivery provider: 'console', 'smtp', or 'mock'"
+    )
+    EMAIL_FROM: str = Field(
+        default="no-reply@itdr-platform.local",
+        description="Sender email address for verification emails"
+    )
+    EMAIL_VERIFICATION_EXPIRE_MINUTES: int = Field(
+        default=30,
+        description="Expiration time in minutes for email verification tokens"
+    )
+    SMTP_HOST: Optional[str] = Field(default=None, description="SMTP server hostname")
+    SMTP_PORT: int = Field(default=587, description="SMTP server port")
+    SMTP_USER: Optional[str] = Field(default=None, description="SMTP authentication username")
+    SMTP_PASSWORD: Optional[str] = Field(default=None, description="SMTP authentication password")
+    SMTP_TLS: bool = Field(default=True, description="Enable STARTTLS for SMTP connections")
+
+    # Usage Limits for Public Demo Analysts
+    DAILY_ANALYSIS_LIMIT: int = Field(
+        default=5,
+        description="Maximum daily GenAI threat modeling executions for Demo Analyst accounts"
+    )
+    GLOBAL_DAILY_ANALYSIS_LIMIT: int = Field(
+        default=100,
+        description="Platform-wide daily analysis quota across all public demo users"
+    )
+    PUBLIC_LLM_ANALYSIS_ENABLED: bool = Field(
+        default=True,
+        description="Emergency killswitch to disable public GenAI analysis execution"
+    )
+    MAX_ADVISORY_CHARS: int = Field(
+        default=15000,
+        description="Maximum character length for input threat advisories"
+    )
+
     RATE_LIMIT_LOGIN_ATTEMPTS: int = Field(default=5, description="Max failed login attempts before temporary throttling")
     RATE_LIMIT_WINDOW_SECONDS: int = Field(default=60, description="Window in seconds for login rate limiting")
     REDIS_URL: Optional[str] = Field(

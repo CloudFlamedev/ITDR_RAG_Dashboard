@@ -118,6 +118,11 @@ class User(Base):
     audit_logs: Mapped[List["AuditLog"]] = relationship(
         "AuditLog", back_populates="user"
     )
+    verification_tokens: Mapped[List["EmailVerificationToken"]] = relationship(
+        "EmailVerificationToken",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
     @property
     def role_names(self) -> List[str]:
@@ -205,6 +210,32 @@ class UserSession(Base):
     user_agent: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     user: Mapped["User"] = relationship("User", back_populates="sessions")
+
+
+class EmailVerificationToken(Base):
+    """Cryptographic verification token for self-registered user email validation."""
+    __tablename__ = "email_verification_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token_hash: Mapped[str] = mapped_column(
+        String(64), unique=True, index=True, nullable=False
+    )
+    expires_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), index=True, nullable=False
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        nullable=False,
+    )
+    used_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="verification_tokens")
 
 
 class AuditLog(Base):

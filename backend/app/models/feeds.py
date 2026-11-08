@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Float,
+    ForeignKey,
     Index,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -37,6 +38,9 @@ class ThreatFeed(Base):
     threat_actors: Mapped[Optional[list]] = mapped_column(JSONB, default=list)  # ["APT29", "Scattered Spider"]
     severity: Mapped[str] = mapped_column(String(50), default="High")  # Critical, High, Medium, Low
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     raw_payload: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
 
     __table_args__ = (

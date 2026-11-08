@@ -27,7 +27,7 @@ def persist_report_and_trace(state: ThreatAnalysisState) -> Dict[str, Any]:
         # Calculate total execution duration
         total_duration = sum(s.get("duration_ms", 0.0) for s in state.get("trace_steps", []))
 
-        # Check if report exists
+        created_by_user_id = state.get("created_by_user_id")
         existing_report = db.query(ThreatAnalysisReport).filter_by(report_id=report_id).first()
         if existing_report:
             existing_report.input_advisory = state["advisory_text"]
@@ -38,6 +38,8 @@ def persist_report_and_trace(state: ThreatAnalysisState) -> Dict[str, Any]:
             existing_report.structured_report = report_dict
             existing_report.completion_status = status
             existing_report.execution_duration_ms = total_duration
+            if created_by_user_id and not existing_report.created_by_user_id:
+                existing_report.created_by_user_id = created_by_user_id
             report_obj = existing_report
         else:
             report_obj = ThreatAnalysisReport(
@@ -53,6 +55,7 @@ def persist_report_and_trace(state: ThreatAnalysisState) -> Dict[str, Any]:
                 completion_status=status,
                 execution_duration_ms=total_duration,
                 is_demo=False,
+                created_by_user_id=created_by_user_id,
             )
             db.add(report_obj)
 

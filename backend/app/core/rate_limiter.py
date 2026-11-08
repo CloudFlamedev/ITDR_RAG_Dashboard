@@ -162,3 +162,7 @@ def create_rate_limiter() -> BaseRateLimiter:
 # Aliases for backward compatibility
 LoginRateLimiter = InMemoryRateLimiter
 login_rate_limiter = create_rate_limiter()
+
+# Registration and verification protection
+registration_rate_limiter = InMemoryRateLimiter(max_attempts=5, window_seconds=60)
+verification_rate_limiter = InMemoryRateLimiter(max_attempts=10, window_seconds=60)

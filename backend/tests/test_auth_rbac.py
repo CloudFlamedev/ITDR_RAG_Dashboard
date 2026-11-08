@@ -334,7 +334,9 @@ def test_rbac_admin_full_access(admin_client):
 
     roles_resp = admin_client.get("/api/users/roles/all")
     assert roles_resp.status_code == 200
-    assert len(roles_resp.json()) == 3
+    assert len(roles_resp.json()) >= 3
+    role_names = [r["name"] for r in roles_resp.json()]
+    assert "Admin" in role_names and "Security Analyst" in role_names and "Viewer" in role_names
 
     audit_resp = admin_client.get("/api/users/audit/logs")
     assert audit_resp.status_code == 200
@@ -501,14 +503,18 @@ def test_oauth_callback_tampered_state(client):
     assert "/login?error=" in callback_res.headers["location"]
 
 
-def test_oauth_unprovisioned_account_rejected(db_session):
+def test_oauth_unprovisioned_account_rejected(db_session, monkeypatch):
     """Test that social login from an unprovisioned email is rejected when auto-registration is disabled."""
+    import app.services.auth_service
+    import uuid
+    monkeypatch.setattr(app.services.auth_service.settings, "ALLOW_OAUTH_AUTO_REGISTRATION", False)
     auth_svc = AuthService(db_session)
+    uid = uuid.uuid4().hex[:8]
     with pytest.raises(Exception) as exc_info:
         auth_svc.handle_oauth_user(
             provider="google",
-            provider_user_id="google_sub_99999",
-            verified_email="unregistered_stranger@external.com",
+            provider_user_id=f"google_sub_unprov_{uid}",
+            verified_email=f"stranger_{uid}@unprovisioned.corp",
             full_name="External Stranger",
         )
     assert "Account not found" in str(exc_info.value.detail)

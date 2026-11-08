@@ -1,12 +1,14 @@
+import re
 import datetime
 import logging
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status, Query
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.rate_limiter import registration_rate_limiter, verification_rate_limiter
 from app.core.security import (
     generate_csrf_token,
     generate_pkce_pair,
@@ -28,6 +30,37 @@ router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 # ------------------------------------------------------------------------------
 # Pydantic Schemas
 # ------------------------------------------------------------------------------
+
+class RegisterRequest(BaseModel):
+    full_name: str = Field(..., min_length=2, max_length=150, description="Full name")
+    email: EmailStr = Field(..., description="Valid work or personal email address")
+    password: str = Field(..., min_length=8, max_length=128, description="Strong password")
+    confirm_password: str = Field(..., description="Confirm password matching")
+
+    @model_validator(mode="after")
+    def validate_password_and_match(self):
+        if self.password != self.confirm_password:
+            raise ValueError("Passwords do not match.")
+
+        pwd = self.password
+        if not re.search(r"[A-Z]", pwd):
+            raise ValueError("Password must contain at least one uppercase letter.")
+        if not re.search(r"[a-z]", pwd):
+            raise ValueError("Password must contain at least one lowercase letter.")
+        if not re.search(r"\d", pwd):
+            raise ValueError("Password must contain at least one digit.")
+        if not re.search(r"[!@#$%^&*(),.?\":{}|<>\-_+=]", pwd):
+            raise ValueError("Password must contain at least one special character.")
+        return self
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str = Field(..., min_length=10, description="Raw verification token received via email")
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr = Field(..., description="Account email to resend verification link")
+
 
 class LoginRequest(BaseModel):
     email: str
@@ -229,6 +262,140 @@ def get_client_ip(request: Request) -> str:
 # ------------------------------------------------------------------------------
 # Endpoints
 # ------------------------------------------------------------------------------
+
+@router.post("/register", status_code=status.HTTP_201_CREATED)
+def register_public_user(
+    payload: RegisterRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Public self-registration for portfolio demo analysts:
+    - Enforces Argon2id password hashing
+    - Verifies password complexity
+    - Normalizes email
+    - Automatically assigns Demo Analyst role
+    - Prevents Admin / Security Analyst privilege escalation
+    - Dispatches verification email
+    """
+    client_ip = get_client_ip(request)
+
+    # Rate limiting: 5 registration attempts per minute per IP
+    is_limited, retry_after = registration_rate_limiter.is_rate_limited(client_ip)
+    if is_limited:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many registration attempts. Please wait {retry_after} seconds before trying again.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    registration_rate_limiter.record_failed_attempt(client_ip)
+
+    auth_svc = AuthService(db)
+    user, raw_token = auth_svc.register_public_user(
+        full_name=payload.full_name,
+        email=payload.email,
+        password=payload.password,
+        ip_address=client_ip,
+    )
+
+    return {
+        "message": "Account created successfully! Please check your email for the verification link.",
+        "email": user.email,
+        "is_verified": user.is_verified,
+        # Expose raw token in non-production/test for automated testing convenience
+        "token": raw_token if not settings.is_production else None,
+    }
+
+
+@router.post("/verify-email")
+def verify_email(
+    payload: VerifyEmailRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Verify email address using the raw cryptographically secure token from the email link.
+    Validates token hash, expiration, and single-use status, then activates the user.
+    """
+    client_ip = get_client_ip(request)
+
+    # Brute-force protection: rate limit verification attempts per IP
+    is_limited, retry_after = verification_rate_limiter.is_rate_limited(client_ip)
+    if is_limited:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many verification attempts. Please wait {retry_after} seconds before trying again.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    auth_svc = AuthService(db)
+    try:
+        user = auth_svc.verify_email_token(raw_token=payload.token, ip_address=client_ip)
+    except HTTPException:
+        verification_rate_limiter.record_failed_attempt(client_ip)
+        raise
+
+    return {
+        "message": "Email verified successfully! You may now log in to the ITDR platform.",
+        "email": user.email,
+        "is_verified": user.is_verified,
+    }
+
+
+@router.get("/verify-email")
+def verify_email_get(
+    request: Request,
+    token: str = Query(..., min_length=10),
+    db: Session = Depends(get_db),
+):
+    """
+    GET handler for direct verification links clicked from email clients.
+    Redirects to frontend login page with status feedback.
+    """
+    client_ip = get_client_ip(request)
+    frontend_origin = get_browser_facing_origin(request)
+
+    # Brute-force protection: rate limit verification attempts per IP
+    is_limited, retry_after = verification_rate_limiter.is_rate_limited(client_ip)
+    if is_limited:
+        return RedirectResponse(
+            url=f"{frontend_origin}/verify-email?error=Too+many+verification+attempts.+Please+wait+{retry_after}+seconds.",
+            status_code=status.HTTP_302_FOUND,
+        )
+
+    auth_svc = AuthService(db)
+    try:
+        user = auth_svc.verify_email_token(raw_token=token, ip_address=client_ip)
+        return RedirectResponse(
+            url=f"{frontend_origin}/login?verified=true&email={user.email}",
+            status_code=status.HTTP_302_FOUND,
+        )
+    except HTTPException as e:
+        verification_rate_limiter.record_failed_attempt(client_ip)
+        return RedirectResponse(
+            url=f"{frontend_origin}/verify-email?error={e.detail}",
+            status_code=status.HTTP_302_FOUND,
+        )
+
+
+@router.post("/resend-verification")
+def resend_verification(
+    payload: ResendVerificationRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Resend verification email to an unverified user account.
+    Protected with a 60-second cooldown rate limit.
+    """
+    client_ip = get_client_ip(request)
+    auth_svc = AuthService(db)
+    auth_svc.resend_verification_email(email=payload.email, ip_address=client_ip)
+
+    return {
+        "message": "If an unverified account exists for this email, a new verification link has been sent."
+    }
+
 
 @router.post("/login", response_model=LoginResponse)
 def login(
@@ -520,6 +687,7 @@ async def oauth_callback(
             provider_user_id=oauth_user.provider_user_id,
             verified_email=oauth_user.email,
             full_name=oauth_user.full_name,
+            email_verified=oauth_user.email_verified,
             ip_address=client_ip,
         )
 

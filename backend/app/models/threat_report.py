@@ -35,11 +35,15 @@ class ThreatAnalysisReport(Base):
     completion_status: Mapped[str] = mapped_column(String(50), default="Completed", index=True)  # Completed, Partial, Insufficient Evidence, Error
     execution_duration_ms: Mapped[Optional[float]] = mapped_column(Float, default=0.0)
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc)
     )
 
     # Relationships
+    created_by_user = relationship("User", foreign_keys=[created_by_user_id])
     citations: Mapped[List["AnalysisCitation"]] = relationship(
         "AnalysisCitation", back_populates="report", cascade="all, delete-orphan"
     )

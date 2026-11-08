@@ -7,6 +7,8 @@ import Sidebar from './components/Sidebar';
 import TopBar from './components/TopBar';
 
 import Login from './screens/Login';
+import Register from './screens/Register';
+import VerifyEmail from './screens/VerifyEmail';
 import OAuthCallback from './screens/OAuthCallback';
 import AccessDenied from './screens/AccessDenied';
 import UserManagement from './screens/UserManagement';
@@ -39,6 +41,8 @@ export const App = () => {
           <Routes>
             {/* Public Authentication Routes */}
             <Route path="/login" element={<Login />} />
+            <Route path="/register" element={<Register />} />
+            <Route path="/verify-email" element={<VerifyEmail />} />
             <Route path="/auth/callback" element={<OAuthCallback />} />
 
             {/* Protected Routes inside SOC Console Layout */}

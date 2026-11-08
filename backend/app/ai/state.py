@@ -16,6 +16,7 @@ class ThreatAnalysisState(TypedDict):
     view_mode: str
     include_d3fend: bool
     max_technique_candidates: int
+    created_by_user_id: Optional[int]
 
     # Entity Extraction
     extracted_indicators: Dict[str, Any]

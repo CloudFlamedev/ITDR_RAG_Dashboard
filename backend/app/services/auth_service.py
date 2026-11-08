@@ -1,4 +1,5 @@
 import datetime
+import time
 import logging
 from typing import Optional, Tuple, List, Dict, Any
 from fastapi import HTTPException, status
@@ -11,12 +12,18 @@ from app.core.security import (
     verify_password,
     generate_session_token,
     hash_session_token,
+    generate_verification_token,
+    hash_verification_token,
 )
 from app.core.rate_limiter import login_rate_limiter
-from app.models.auth import User, Role, UserSession, AuthIdentity, AuditLog
+from app.models.auth import User, Role, UserSession, AuthIdentity, AuditLog, EmailVerificationToken
+from app.services.email_service import email_service
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# In-memory store for verification resend cooldown
+_resend_rate_limiter: Dict[str, float] = {}
 
 # Dummy Argon2id hash for constant-time comparison when user does not exist
 DUMMY_PASSWORD_HASH = "$argon2id$v=19$m=65536,t=2,p=2$dummyhashfordummyuserdummyhash$dummyhashfordummyuserdummyhashdummyhashdummy"
@@ -109,7 +116,21 @@ class AuthService:
                 detail="Invalid email or password.",
             )
 
-        # 6. Reset rate limits and record login timestamp
+        # 6. Check email verification status
+        if not user.is_verified:
+            self.log_audit_event(
+                user_id=user.id,
+                action="login_rejected_unverified_email",
+                resource="auth",
+                ip_address=ip_address,
+                metadata={"email": clean_email},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Email address has not been verified. Please verify your email before logging in, or request a new verification link.",
+            )
+
+        # 7. Reset rate limits and record login timestamp
         login_rate_limiter.reset(rate_limit_key)
         now = datetime.datetime.now(datetime.timezone.utc)
         user.last_login_at = now
@@ -259,15 +280,30 @@ class AuthService:
         provider_user_id: str,
         verified_email: str,
         full_name: str,
+        email_verified: bool = True,
         ip_address: Optional[str] = None,
     ) -> User:
         """
         Securely resolve or link a third-party social login identity:
-        1. Check if (provider, provider_user_id) identity is already linked.
-        2. If not, link to an existing user with matching verified email.
-        3. If no account exists and auto-registration is disabled, reject.
+        1. Verify provider email verification before linking.
+        2. Check if (provider, provider_user_id) identity is already linked.
+        3. If not, link to an existing user with matching verified email.
+        4. If no account exists and auto-registration is disabled, reject.
         """
         clean_email = verified_email.strip().lower()
+
+        if not email_verified:
+            self.log_audit_event(
+                user_id=None,
+                action=f"{provider}_login_rejected_unverified_email",
+                resource="auth",
+                ip_address=ip_address,
+                metadata={"email": clean_email, "provider": provider},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot authenticate: {provider} account email is not verified by the provider.",
+            )
 
         # Step 1: Look up existing identity
         identity = (
@@ -345,8 +381,14 @@ class AuthService:
                 detail="Account not found. Please contact an ITDR Administrator to provision your account before signing in.",
             )
 
-        # Optional auto-registration as Viewer if enabled
-        viewer_role = self.db.query(Role).filter(Role.name == "Viewer").first()
+        # Auto-registration as Demo Analyst (public portfolio mode)
+        target_role_name = settings.DEFAULT_REGISTRATION_ROLE or "Demo Analyst"
+        assigned_role = self.db.query(Role).filter(Role.name == target_role_name).first()
+        if not assigned_role:
+            assigned_role = self.db.query(Role).filter(Role.name == "Demo Analyst").first()
+        if not assigned_role:
+            assigned_role = self.db.query(Role).filter(Role.name == "Viewer").first()
+
         now = datetime.datetime.now(datetime.timezone.utc)
         new_user = User(
             email=clean_email,
@@ -357,7 +399,7 @@ class AuthService:
             created_at=now,
             updated_at=now,
             last_login_at=now,
-            roles=[viewer_role] if viewer_role else [],
+            roles=[assigned_role] if assigned_role else [],
         )
         self.db.add(new_user)
         self.db.flush()
@@ -377,9 +419,244 @@ class AuthService:
             action=f"{provider}_user_auto_provisioned",
             resource="auth",
             ip_address=ip_address,
-            metadata={"email": clean_email, "role": "Viewer"},
+            metadata={"email": clean_email, "role": assigned_role.name if assigned_role else "None"},
         )
         return new_user
+
+    def register_public_user(
+        self,
+        full_name: str,
+        email: str,
+        password: str,
+        ip_address: Optional[str] = None,
+    ) -> Tuple[User, str]:
+        """
+        Public self-registration for portfolio demo visitors:
+        - Rejects registration if disabled in settings
+        - Normalizes email
+        - Prevents duplicate registration
+        - Hashes password using Argon2id
+        - Automatically assigns Demo Analyst role (prevents elevation)
+        - Creates account with is_verified=False
+        - Generates SHA-256 hashed verification token
+        - Dispatches verification email
+        - Logs audit event
+        """
+        if not settings.PUBLIC_REGISTRATION_ENABLED:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Public registration is currently disabled.",
+            )
+
+        clean_email = (email or "").strip().lower()
+
+        # Check existing user
+        existing_user = self.db.query(User).filter(User.email == clean_email).first()
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="An account with this email address already exists.",
+            )
+
+        # Hash password with Argon2id
+        pwd_hash = hash_password(password)
+
+        # Assign default registration role (Demo Analyst)
+        target_role_name = settings.DEFAULT_REGISTRATION_ROLE or "Demo Analyst"
+        assigned_role = self.db.query(Role).filter(Role.name == target_role_name).first()
+        if not assigned_role:
+            assigned_role = self.db.query(Role).filter(Role.name == "Demo Analyst").first()
+        if not assigned_role:
+            assigned_role = self.db.query(Role).filter(Role.name == "Viewer").first()
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        new_user = User(
+            email=clean_email,
+            full_name=full_name.strip(),
+            password_hash=pwd_hash,
+            is_active=True,
+            is_verified=False,
+            created_at=now,
+            updated_at=now,
+            roles=[assigned_role] if assigned_role else [],
+        )
+        self.db.add(new_user)
+        self.db.flush()
+
+        # Generate verification token
+        raw_token, token_hash = generate_verification_token()
+        expires_at = now + datetime.timedelta(minutes=settings.EMAIL_VERIFICATION_EXPIRE_MINUTES)
+
+        verif_token = EmailVerificationToken(
+            user_id=new_user.id,
+            token_hash=token_hash,
+            expires_at=expires_at,
+            created_at=now,
+            used_at=None,
+        )
+        self.db.add(verif_token)
+        self.db.commit()
+        self.db.refresh(new_user)
+
+        # Dispatch email
+        email_service.send_verification_email(
+            to_email=clean_email,
+            raw_token=raw_token,
+            full_name=new_user.full_name,
+        )
+
+        self.log_audit_event(
+            user_id=new_user.id,
+            action="user_registered",
+            resource="auth",
+            ip_address=ip_address,
+            metadata={"email": clean_email, "role": assigned_role.name if assigned_role else "None"},
+        )
+
+        return new_user, raw_token
+
+    def verify_email_token(
+        self,
+        raw_token: str,
+        ip_address: Optional[str] = None,
+    ) -> User:
+        """
+        Validates token hash against email_verification_tokens:
+        - Ensures token exists
+        - Ensures not previously used
+        - Ensures not expired
+        - Sets user.is_verified = True
+        - Marks token used_at timestamp
+        - Logs audit event
+        """
+        if not raw_token or len(raw_token.strip()) < 10:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid verification token.",
+            )
+
+        clean_token = raw_token.strip()
+        token_hash = hash_verification_token(clean_token)
+
+        verif_record = (
+            self.db.query(EmailVerificationToken)
+            .filter(EmailVerificationToken.token_hash == token_hash)
+            .with_for_update()
+            .first()
+        )
+
+        if not verif_record:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired verification link.",
+            )
+
+        if verif_record.used_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This verification token has already been used.",
+            )
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if verif_record.expires_at <= now:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Verification link has expired. Please request a new verification email.",
+            )
+
+        user = verif_record.user
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Associated user account not found.",
+            )
+
+        verif_record.used_at = now
+        user.is_verified = True
+        self.db.commit()
+        self.db.refresh(user)
+
+        self.log_audit_event(
+            user_id=user.id,
+            action="email_verified",
+            resource="auth",
+            ip_address=ip_address,
+            metadata={"email": user.email},
+        )
+
+        return user
+
+    def resend_verification_email(
+        self,
+        email: str,
+        ip_address: Optional[str] = None,
+    ) -> bool:
+        """
+        Generates a fresh verification token and dispatches email.
+        Applies cooldown rate limiting per email.
+        """
+        clean_email = (email or "").strip().lower()
+        now_ts = time.time()
+
+        # Cooldown check: 60 seconds
+        last_resend = _resend_rate_limiter.get(clean_email, 0.0)
+        if (now_ts - last_resend) < 60:
+            remaining = int(60 - (now_ts - last_resend))
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Please wait {remaining} seconds before requesting another verification email.",
+                headers={"Retry-After": str(remaining)},
+            )
+
+        user = self.db.query(User).filter(User.email == clean_email).first()
+        if not user:
+            # Prevent user enumeration: pretend success
+            _resend_rate_limiter[clean_email] = now_ts
+            return True
+
+        if user.is_verified:
+            # Already verified
+            _resend_rate_limiter[clean_email] = now_ts
+            return True
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        # Invalidate old unused tokens
+        self.db.query(EmailVerificationToken).filter(
+            EmailVerificationToken.user_id == user.id,
+            EmailVerificationToken.used_at.is_(None),
+        ).update({"used_at": now})
+
+        # Generate fresh token
+        raw_token, token_hash = generate_verification_token()
+        expires_at = now + datetime.timedelta(minutes=settings.EMAIL_VERIFICATION_EXPIRE_MINUTES)
+
+        verif_token = EmailVerificationToken(
+            user_id=user.id,
+            token_hash=token_hash,
+            expires_at=expires_at,
+            created_at=now,
+            used_at=None,
+        )
+        self.db.add(verif_token)
+        self.db.commit()
+
+        _resend_rate_limiter[clean_email] = now_ts
+
+        email_service.send_verification_email(
+            to_email=clean_email,
+            raw_token=raw_token,
+            full_name=user.full_name,
+        )
+
+        self.log_audit_event(
+            user_id=user.id,
+            action="verification_email_resent",
+            resource="auth",
+            ip_address=ip_address,
+            metadata={"email": clean_email},
+        )
+
+        return True
 
     def log_audit_event(
         self,

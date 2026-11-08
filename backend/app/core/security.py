@@ -141,3 +141,20 @@ def verify_oauth_state(provider: str, state: str, max_age_seconds: int = 600) ->
     raw = f"{prov}:{nonce}:{ts_str}".encode("utf-8")
     expected_sig = hmac.new(settings.SESSION_SECRET_KEY.encode("utf-8"), raw, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected_sig, provided_sig)
+
+
+def generate_verification_token() -> Tuple[str, str]:
+    """
+    Generate a cryptographically secure URL-safe verification token and its SHA-256 hash.
+    Returns:
+        (raw_token, token_hash)
+    """
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hash_verification_token(raw_token)
+    return raw_token, token_hash
+
+
+def hash_verification_token(raw_token: str) -> str:
+    """Compute SHA-256 hash of verification token for storage and lookup."""
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+

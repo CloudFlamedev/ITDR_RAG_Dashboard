@@ -1,19 +1,22 @@
-# ITDR Platform — Authentication & Authorization (RBAC) Architecture
+# ITDR Platform — Authentication, Authorization & Public Registration Architecture
 
-This document details the enterprise security model, session management, Role-Based Access Control (RBAC), OAuth 2.0 / OpenID Connect flows, and administrative provisioning implemented in the **Identity Threat Detection & Response (ITDR) Platform**.
+This document details the enterprise security model, session management, Role-Based Access Control (RBAC), OAuth 2.0 / OpenID Connect flows, public self-registration, email verification, multi-tenant report isolation, and usage bounds implemented in the **Identity Threat Detection & Response (ITDR) Platform**.
 
 ---
 
 ## 1. High-Level Security Architecture
 
 The ITDR platform implements a **defense-in-depth, zero-trust security perimeter**:
-- **Default-Deny Access Policy**: All API endpoints (except `/health` and `/`) require cryptographic authentication and RBAC authorization.
+- **Default-Deny Access Policy**: All API endpoints (except `/health` and `/`) require cryptographic authentication and fine-grained RBAC authorization.
 - **Server-Managed Session Store**: Stateful sessions persisted in Neon PostgreSQL (`user_sessions` table). Session identifiers transmitted in `HttpOnly`, `Secure`, `SameSite=Lax` cookies; only their SHA-256 hashes are stored in the database.
 - **Argon2id Password Hashing**: Passwords hashed using standard Argon2id parameters (`m=65536`, `t=2`, `p=2`), with constant-time verification against timing attacks.
-- **OAuth 2.0 & OIDC**: Social single sign-on with Google (OpenID Connect with RFC 7636 PKCE S256) and GitHub OAuth 2.0 with verified primary email enforcement.
-- **Account Linking & Provisioning**: Strict anti-account takeover rules. Self-registration is disabled; new accounts must be provisioned by a SOC Administrator.
+- **Public Self-Registration**: Public portfolio demo visitors can self-register at `/register` and explore the application. Accounts are automatically restricted to the bounded `Demo Analyst` role to prevent privilege escalation.
+- **Email Verification**: Cryptographic 32-byte URL-safe verification tokens (stored as SHA-256 hashes in `email_verification_tokens`) with 30-minute expiration. Unverified accounts cannot log in (HTTP 403) and are offered a rate-limited resend flow.
+- **Public Social Sign-Up**: Google OIDC (with RFC 7636 PKCE S256) and GitHub OAuth 2.0 automatically provision new visitor accounts with `Demo Analyst` role and verified status.
+- **Multi-Tenant Report Isolation**: User threat analysis reports are attributed to `created_by_user_id`. Visitors can only view their own reports and shared demo reports; other users' reports return HTTP 404. SOC Administrators retain full visibility.
+- **Usage Limits & Quotas**: Maximum advisory input size (`MAX_ADVISORY_CHARS=15000`), daily GenAI threat modeling quota (`DAILY_ANALYSIS_LIMIT=5` per 24 hours returning HTTP 429), and RAG search rate limiting.
 - **HMAC CSRF Defense**: Double-submit cookie + signed HMAC-SHA256 CSRF tokens required on all state-changing HTTP requests (`POST`, `PUT`, `PATCH`, `DELETE`).
-- **Sliding Inactivity & Absolute Expiration**: Sessions automatically terminate after 30 minutes of inactivity or 12 hours absolute maximum age.
+- **Audit-Log Immutability**: All security events recorded to an append-only PostgreSQL table protected by a native database trigger and ORM listeners.
 
 ```
                            +---------------------------+
@@ -27,6 +30,7 @@ The ITDR platform implements a **defense-in-depth, zero-trust security perimeter
                          | FastAPI Gateway / Middlewares |
                          | - Exact CORS Origin Whitelist |
                          | - Rate Limiter (Sliding Window|
+                         | - MAX_ADVISORY_CHARS Limit    |
                          +---------------+---------------+
                                          |
                        [get_current_user_and_session]
@@ -45,8 +49,8 @@ The ITDR platform implements a **defense-in-depth, zero-trust security perimeter
                   |                      |                      |
                   v                      v                      v
           +---------------+      +---------------+      +---------------+
-          |     Admin     |      |Sec. Analyst   |      |    Viewer     |
-          | (Full Control)|      | (Analyze/Read)|      |  (Read-Only)  |
+          |     Admin     |      |Sec. Analyst   |      | Demo Analyst  |
+          | (Full Control)|      | (Analyze/Read)|      | (Bounded Demo)|
           +---------------+      +---------------+      +---------------+
 ```
 
@@ -56,134 +60,142 @@ The ITDR platform implements a **defense-in-depth, zero-trust security perimeter
 
 ### A. Traditional Email & Password (Argon2id)
 - **Password Hasher**: Memory-hard Argon2id configured with 64MB RAM cost and 2 iterations to resist GPU-based brute-force cracking.
+- **Password Complexity Validation**: Enforced via Pydantic model validators:
+  - Minimum 8 characters, maximum 128 characters
+  - At least 1 uppercase letter (`[A-Z]`)
+  - At least 1 lowercase letter (`[a-z]`)
+  - At least 1 digit (`\d`)
+  - At least 1 special character (`[!@#$%^&*(),.?":{}|<>\-_+=]`)
+  - Matching `password` and `confirm_password` fields
 - **Timing Attack Defense**: When an unknown email address is supplied, the server performs a dummy Argon2id calculation against a pre-computed hash to ensure constant response times.
-- **Rate Limiting**: In-memory sliding window limiter (`LoginRateLimiter`) blocks repeated failed attempts (default: 5 failures within 15 minutes). When tripped, returns `HTTP 429 Too Many Requests` with a `Retry-After` header.
+- **Rate Limiting**: In-memory sliding window limiter (`LoginRateLimiter`) blocks repeated failed attempts (default: 5 failures within 60 seconds). When tripped, returns `HTTP 429 Too Many Requests` with a `Retry-After` header.
 
-### B. Social Login (Google OIDC & GitHub OAuth 2.0)
-- **Google OIDC with PKCE (RFC 7636)**:
-  - Generates 32-byte URL-safe `code_verifier` and derives `code_challenge` using SHA-256 (`S256`).
-  - Exchanges authorization code for Google ID token.
-  - Verifies Google's cryptographic RSA signature dynamically using Google's public JWKS certificates (`https://www.googleapis.com/oauth2/v3/certs`), matching `iss`, `aud`, expiration, and verified email status.
+### B. Public Self-Registration & Email Verification Flow
+- **Endpoint**: `POST /api/auth/register`
+- **Role Assignment**: Automatically assigns `Demo Analyst` role. Public registration payloads attempting to specify `role` or `roles` are strictly ignored.
+- **Token Generation**: Generates 32-byte URL-safe cryptographic token using `secrets.token_urlsafe(32)`.
+- **Database Storage**: Raw token is never stored in PostgreSQL. Only its deterministic SHA-256 hash is saved in `email_verification_tokens`.
+- **Token Expiration**: Default 30 minutes (`EMAIL_VERIFICATION_EXPIRE_MINUTES`).
+- **Activation Flow**:
+  1. User registers via `/register`. Account is created with `is_verified=False`.
+  2. Verification email dispatched via configured provider (`console`, `smtp`, or `mock`).
+  3. User opens `/verify-email?token=...`.
+  4. Backend verifies hash, expiration, and ensures token has not been previously consumed (`used_at IS NULL`).
+  5. Upon successful verification, user is marked `is_verified=True`, token is marked `used_at=now`, and audit log is recorded.
+- **Login Guard**: Unverified users attempting traditional password login are blocked with `HTTP 403 Forbidden` and given a one-click resend option.
+- **Resend Endpoint**: `POST /api/auth/resend-verification` enforces a 60-second cooldown rate limit.
+
+### C. Social Single Sign-On (Google OIDC & GitHub OAuth 2.0)
+- **Google OpenID Connect**:
+  - Implements **RFC 7636 PKCE (S256)**: Verifier stored in short-lived HttpOnly cookie (`itdr_pkce_verifier`).
+  - Scopes: `openid email profile`. Validates Google JWT ID Token.
 - **GitHub OAuth 2.0**:
-  - Exchanges authorization code for access token.
-  - Directly queries GitHub's `/user` and `/user/emails` endpoints to resolve the user's verified primary email.
-- **Anti-CSRF State Parameter**:
-  - State token format: `provider.nonce.timestamp.hmac`.
-  - Cryptographically signed with `SESSION_SECRET_KEY` and cached in a short-lived cookie (`itdr_oauth_state`). Mismatched or expired state parameters are rejected immediately.
-
-### C. Account Linking Rules
-1. **Self-Registration Disabled**: When an unknown identity signs in via Google or GitHub, the system verifies `ALLOW_OAUTH_AUTO_REGISTRATION`. When `False` (enterprise default), login is rejected with `HTTP 403 Forbidden` directing the user to contact their SOC administrator.
-2. **Deterministic Email Match**: If an administrator has provisioned an account for `analyst@enterprise.corp`, a subsequent verified Google/GitHub login for that exact verified email address automatically links the provider identity (`AuthIdentity` record).
-3. **No Unverified Emails**: Email addresses flagged as unverified by Google or GitHub are discarded and rejected.
+  - Scopes: `read:user user:email`. Fetches primary verified email via `/user/emails`.
+- **Anti-CSRF State Protection**: Tamper-proof signed state token (`provider.nonce.timestamp.hmac`) validated against cookie and signature before code exchange.
+- **Public Auto-Registration**: When `ALLOW_OAUTH_AUTO_REGISTRATION=true`, unregistered social visitors are automatically provisioned as `Demo Analyst` with `is_verified=True`.
+- **Existing User Linking**: Social accounts matching an existing user's verified email automatically link the external identity to the existing account.
 
 ---
 
-## 3. Session Management
+## 3. Role-Based Access Control (RBAC) Matrix
 
-Sessions are managed server-side and persisted in the PostgreSQL `user_sessions` table:
+Permissions are fine-grained strings mapped to roles via `role_permissions` join table:
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | `UUID` | Unique session identifier (used to key CSRF tokens). |
-| `user_id` | `Integer` | Foreign key referencing `users.id`. |
-| `session_token_hash` | `String(64)` | Deterministic SHA-256 hash of the 43-character URL-safe raw token. |
-| `created_at` | `DateTime` | Session creation timestamp. |
-| `last_activity_at` | `DateTime` | Sliding activity marker (sliding inactivity window: 30 minutes). |
-| `expires_at` | `DateTime` | Absolute expiration timestamp (default: 720 minutes / 12 hours). |
-| `revoked_at` | `DateTime` | Revocation timestamp populated on logout or account deactivation. |
-| `ip_address` | `String(45)` | Client IP address for audit and geolocation detection. |
-| `user_agent` | `String(500)` | Client browser User-Agent telemetry. |
-
-### Cookie Attributes
-- `Name`: `itdr_session`
-- `HttpOnly`: `True` (prevents XSS token exfiltration)
-- `Secure`: `True` in production HTTPS environments
-- `SameSite`: `Lax` (protects against cross-site request forgery while preserving top-level navigation)
-- `Path`: `/`
+| Permission Key | Description | Admin | Security Analyst | Viewer | Demo Analyst |
+|---|---|:---:|:---:|:---:|:---:|
+| `dashboard:read` | View Screen 1 Identity Resilience & Screen 3 Threat Exposure | ✅ | ✅ | ✅ | ✅ |
+| `matrix:read` | View Screen 2 ITDR Coverage Matrix & TTP Details | ✅ | ✅ | ✅ | ✅ |
+| `feeds:read` | View Screen 5 Bulletins & Screen 7 Completed Reports | ✅ | ✅ | ✅ | ✅ |
+| `threats:read` | View Screen 4 Threat Scenarios & Persisted Analysis Reports | ✅ | ✅ | ✅ | ✅ |
+| `rag:read` | View RAG Retrieval Diagnostics & Health telemetry | ✅ | ✅ | ✅ | ✅ |
+| `threats:analyze`| Execute LangGraph GenAI Threat Modeling Pipeline | ✅ | ✅ | ❌ | ✅ *(5/day quota)* |
+| `rag:search` | Perform raw semantic vector search over ATT&CK/D3FEND | ✅ | ✅ | ❌ | ✅ *(30/min limit)* |
+| `feeds:ingest` | Ingest custom CTI bulletins and threat feeds | ✅ | ✅ | ❌ | ❌ |
+| `system:status` | View backend system telemetry and database health | ✅ | ❌ | ❌ | ❌ |
+| `users:manage` | Provision, update, deactivate users and view audit logs | ✅ | ❌ | ❌ | ❌ |
 
 ---
 
-## 4. Role-Based Access Control (RBAC)
+## 4. Multi-Tenant Data Isolation Architecture
 
-The platform supports 3 primary roles and 10 granular permissions:
+To prevent public visitors from viewing each other's custom threat analysis reports and threat intelligence feeds:
+- **Ownership Column**: `created_by_user_id` added to `threat_analysis_reports` and `threat_feeds`.
+- **Query Scoping in `list_reports`**:
+  ```python
+  if not current_user.has_role("Admin"):
+      query = query.filter(
+          (ThreatAnalysisReport.created_by_user_id == current_user.id) |
+          (ThreatAnalysisReport.created_by_user_id.is_(None)) |
+          (ThreatAnalysisReport.is_demo.is_(True))
+      )
+  ```
+- **Detail Protection in `get_report_detail`**:
+  ```python
+  if not current_user.has_role("Admin"):
+      is_owner = (rep.created_by_user_id == current_user.id)
+      is_demo_rep = (rep.created_by_user_id is None or rep.is_demo)
+      if not is_owner and not is_demo_rep:
+          raise HTTPException(status_code=404, detail=f"Report {report_id} not found")
+  ```
+- **Query Scoping in `get_bulletins`**:
+  ```python
+  if not current_user.has_role("Admin"):
+      query = query.filter(
+          (ThreatFeed.created_by_user_id == current_user.id) |
+          (ThreatFeed.created_by_user_id.is_(None)) |
+          (ThreatFeed.is_demo.is_(True))
+      )
+  ```
+- **Detail Protection in `get_bulletin_detail`**:
+  ```python
+  if not current_user.has_role("Admin"):
+      is_owner = (b.created_by_user_id == current_user.id)
+      is_shared = (b.created_by_user_id is None or b.is_demo)
+      if not is_owner and not is_shared:
+          raise HTTPException(status_code=404, detail=f"Bulletin {bulletin_id} not found")
+  ```
+- **Shared Demo Data**: Records with `is_demo=True` or `created_by_user_id IS NULL` remain visible to all authenticated analysts as shared portfolio examples.
+- **Admin Visibility**: SOC Administrators bypass tenant filtering to oversee all platform reports and feeds.
 
-| Permission Key | Description | Admin | Security Analyst | Viewer |
+---
+
+## 5. Usage Bounds & Abuse Prevention
+
+To protect LLM token budgets (xAI Grok) and compute resources in a public portfolio setting:
+1. **Advisory Input Size**: Maximum character limit of 15,000 characters (`MAX_ADVISORY_CHARS`). Submissions exceeding this limit return `HTTP 400 Bad Request`.
+2. **Emergency Kill Switch**: `PUBLIC_LLM_ANALYSIS_ENABLED` flag in `config.py`. When set to `False`, public/non-admin threat analysis requests return `HTTP 503 Service Unavailable`, instantly halting external LLM execution without taking down the platform. Administrators retain bypass capability.
+3. **Global Daily Capacity Limit**: `GLOBAL_DAILY_ANALYSIS_LIMIT` (default: 100 analyses/day platform-wide). Prevents rogue botnets from exhausting platform API credits.
+4. **Per-User Daily Quota & Atomic Pre-Reservation**: Non-admins are limited to 5 threat analyses per 24 hours (`DAILY_ANALYSIS_LIMIT`). Tripping the quota returns `HTTP 429 Too Many Requests` with a `Retry-After: 86400` header and records an audit log entry. To prevent concurrent requests from bypassing the quota (TOCTOU), the backend performs an **atomic pre-reservation** write to `threat_analysis_reports` with status `"Processing"` inside a database transaction *before* dispatching to LangGraph.
+5. **Registration Rate Limiting**: `registration_rate_limiter` limits self-registration to 5 attempts per minute per IP address (`HTTP 429`).
+6. **Email Verification Brute-Force Defense**: `verification_rate_limiter` limits verification token submissions to 10 attempts per minute per IP address (`HTTP 429`).
+7. **RAG Vector Search Rate Limit**: Non-admins are limited to 30 semantic searches per minute (`HTTP 429`).
+8. **Resend Email Rate Limit**: Verification email requests enforce a 60-second cooldown per address.
+
+---
+
+## 6. Audit Trail & Immutability
+
+Security events recorded via `AuthService.log_audit_event`:
+- `user_registered`: Self-registration recorded with assigned role
+- `email_verified`: Account verification event
+- `verification_email_resent`: Resend request recorded
+- `login_success` / `login_failed_bad_password` / `login_rejected_unverified_email`
+- `analysis_quota_exceeded`: Rate/quota breach recorded with user ID and count
+- `google_user_auto_provisioned` / `github_user_auto_provisioned`: Social auto-provisioning
+- `session_created` / `session_revoked` / `all_sessions_revoked`
+
+Database-level immutability is guaranteed by trigger `trg_audit_logs_immutable` and SQLAlchemy session listeners. Any attempt to modify or delete audit log records raises a database exception.
+
+---
+
+## 7. Automated Test Coverage Summary
+
+Total automated tests passing: **62 / 62 tests (100% Pass Rate)**
+
+| Test Suite | File | Tests | Execution Time | Result |
 |---|---|:---:|:---:|:---:|
-| `dashboard:read` | View Identity Resilience Overview & Posture Reports | ✅ | ✅ | ✅ |
-| `matrix:read` | Inspect ITDR Coverage Matrix & TTP Drawer | ✅ | ✅ | ✅ |
-| `feeds:read` | View Threat Feeds & Ingested CTI Bulletins | ✅ | ✅ | ✅ |
-| `threats:read` | Access Threat Samples & View Completed Reports | ✅ | ✅ | ✅ |
-| `rag:read` | Read-only access to RAG knowledge base & health | ✅ | ✅ | ✅ |
-| `threats:analyze` | Execute 11-node LangGraph GenAI Threat Modeling workflow | ✅ | ✅ | ❌ |
-| `feeds:ingest` | Ingest external CTI advisories & custom threat feeds | ✅ | ✅ | ❌ |
-| `rag:search` | Perform dense vector / hybrid semantic searches | ✅ | ✅ | ❌ |
-| `system:status` | Access full subsystem health telemetry (Neon, pgvector, Grok) | ✅ | ❌ | ❌ |
-| `users:manage` | Provision, deactivate, update roles, and review audit logs | ✅ | ❌ | ❌ |
+| Public Registration & Social Auth | `test_public_registration_and_social.py` | 27 | 270.79s | 🟢 **27/27 PASS** |
+| Core Authentication & RBAC Hardening | `test_auth_rbac.py` | 29 | 196.83s | 🟢 **29/29 PASS** |
+| API Regression & Business Logic | `test_api_endpoints.py` | 6 | 154.69s | 🟢 **6/6 PASS** |
+| Frontend Production Build | Vite 5.4.21 | 2,386 modules | 3.96s | 🟢 **0 ERRORS** |
 
----
-
-## 5. Administrative Provisioning & Bootstrap CLI
-
-### Bootstrapping the Initial Administrator
-To provision or promote the initial Administrator account (passwords are securely prompted via masked input):
-```bash
-# In backend virtualenv
-PYTHONPATH=backend python backend/scripts/bootstrap_admin.py \
-  --email "admin@enterprise.corp" \
-  --name "Lead SOC Administrator"
-```
-Or in headless CI/CD automation:
-```bash
-ADMIN_INITIAL_PASSWORD="GenerateStrongPassword123!" \
-PYTHONPATH=backend python backend/scripts/bootstrap_admin.py \
-  --email "admin@enterprise.corp" \
-  --name "Lead SOC Administrator"
-```
-
-### Administrative Endpoints
-- `GET /api/users`: Search and list provisioned users.
-- `POST /api/users`: Provision a new user account with Argon2id password.
-- `GET /api/users/{id}`: Inspect user account details.
-- `PATCH /api/users/{id}`: Update name, password, or active status.
-- `PATCH /api/users/{id}/roles`: Assign or update user roles.
-- `DELETE /api/users/{id}`: Deactivate user and immediately revoke all active sessions.
-- `GET /api/users/roles/all`: List available system roles and permissions.
-- `GET /api/users/audit/logs`: Filter and inspect immutable security audit events (read-only; mutating HTTP methods return HTTP 405).
-
----
-
-## 6. Immutable Security Audit Logging
-
-Audit logs are strictly **append-only** and tamper-proof:
-- **Database Trigger**: PostgreSQL trigger `trg_audit_logs_immutable` enforces append-only rules at the database engine level, rejecting any `UPDATE` or `DELETE` statements.
-- **ORM Event Listeners**: SQLAlchemy event listeners prevent modifications or deletions before flush.
-- **API Guardrails**: The `/api/users/audit/logs` endpoint only implements `GET`. `POST`, `PUT`, `PATCH`, and `DELETE` requests are rejected with `HTTP 405 Method Not Allowed`.
-- Recorded security events include:
-  - `login_success`, `login_failed_bad_password`, `login_failed_unknown_user`, `login_throttled`
-  - `session_created`, `session_revoked`, `all_sessions_revoked`
-  - `user_created`, `user_updated`, `user_roles_updated`, `user_deactivated`
-  - `google_login_success`, `github_login_success`, `google_account_linked`, `github_account_linked`
-
----
-
-## 7. Configuration Environment Variables
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `SESSION_SECRET_KEY` | *(Generated random 32-byte secret)* | Signs CSRF tokens and OAuth state tokens. |
-| `SESSION_EXPIRE_MINUTES` | `720` (12 hours) | Absolute session expiration limit. |
-| `SESSION_INACTIVITY_MINUTES` | `30` (30 mins) | Sliding inactivity timeout limit. |
-| `SESSION_COOKIE_NAME` | `itdr_session` | Name of the session cookie. |
-| `CSRF_COOKIE_NAME` | `itdr_csrf` | Name of the CSRF token cookie. |
-| `SESSION_COOKIE_SECURE` | `False` (dev) / `True` (prod) | Requires HTTPS for cookies. |
-| `SESSION_COOKIE_SAMESITE` | `lax` | SameSite cookie policy. |
-| `CORS_ORIGIN_WHITELIST` | `http://localhost:5173,...` | Allowed frontend origins (no wildcards allowed). |
-| `RATE_LIMIT_LOGIN_ATTEMPTS` | `5` | Maximum failed attempts allowed in window. |
-| `RATE_LIMIT_WINDOW_SECONDS` | `900` (15 mins) | Sliding rate-limiting window duration. |
-| `ALLOW_OAUTH_AUTO_REGISTRATION` | `False` | Whether unknown social logins can auto-create Viewer accounts. |
-| `GOOGLE_CLIENT_ID` | `""` | Google Cloud OAuth Client ID. |
-| `GOOGLE_CLIENT_SECRET` | `""` | Google Cloud OAuth Client Secret. |
-| `GOOGLE_REDIRECT_URI` | `http://localhost:8000/api/auth/oauth/google/callback` | Exact registered Google callback URI. |
-| `GITHUB_CLIENT_ID` | `""` | GitHub OAuth App Client ID. |
-| `GITHUB_CLIENT_SECRET` | `""` | GitHub OAuth App Client Secret. |
-| `GITHUB_REDIRECT_URI` | `http://localhost:8000/api/auth/oauth/github/callback` | Exact registered GitHub callback URI. |

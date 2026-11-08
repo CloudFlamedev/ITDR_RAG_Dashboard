@@ -31,6 +31,10 @@ class RagSearchResponse(BaseModel):
     highest_confidence: float
 
 
+import time
+_rag_search_rate_limiter: Dict[int, List[float]] = {}
+
+
 @router.post("/search", response_model=RagSearchResponse)
 def search_rag_knowledge(
     req: RagSearchRequest,
@@ -42,6 +46,19 @@ def search_rag_knowledge(
     ATT&CK techniques and D3FEND defensive countermeasures before LLM generation.
     Protected: rag:search.
     """
+    # Rate limit public demo analysts (30 searches / min)
+    if not current_user.has_role("Admin"):
+        now_ts = time.time()
+        timestamps = _rag_search_rate_limiter.get(current_user.id, [])
+        timestamps = [t for t in timestamps if now_ts - t < 60]
+        if len(timestamps) >= 30:
+            raise HTTPException(
+                status_code=429,
+                detail="Rate limit exceeded for RAG searches (maximum 30 requests per minute).",
+                headers={"Retry-After": "60"},
+            )
+        timestamps.append(now_ts)
+        _rag_search_rate_limiter[current_user.id] = timestamps
     retriever = RetrievalService(db)
     results = retriever.retrieve(
         advisory_text=req.query,

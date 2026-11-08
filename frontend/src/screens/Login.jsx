@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
+import { useNavigate, useLocation, useSearchParams, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { apiClient } from '../api/client';
 import {
   ShieldAlert,
   ShieldCheck,
@@ -9,8 +10,10 @@ import {
   Eye,
   EyeOff,
   AlertTriangle,
+  CheckCircle2,
   Loader2,
   ExternalLink,
+  Send,
 } from 'lucide-react';
 
 export const Login = () => {
@@ -19,11 +22,14 @@ export const Login = () => {
   const location = useLocation();
   const [searchParams] = useSearchParams();
 
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(searchParams.get('email') || '');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState(searchParams.get('error') || null);
+  const [isVerifiedNotice, setIsVerifiedNotice] = useState(searchParams.get('verified') === 'true');
+  const [isResending, setIsResending] = useState(false);
+  const [resendStatusMsg, setResendStatusMsg] = useState(null);
 
   const destination = location.state?.from?.pathname || '/';
 
@@ -53,6 +59,24 @@ export const Login = () => {
     }
   };
 
+  const handleResendVerification = async () => {
+    if (!email) {
+      setErrorMsg('Please enter your email address to receive a verification link.');
+      return;
+    }
+    setIsResending(true);
+    setResendStatusMsg(null);
+    try {
+      const res = await apiClient.resendVerification(email);
+      setResendStatusMsg(res.message || 'Verification link sent! Please check your inbox.');
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      setErrorMsg(detail || err.message || 'Could not resend verification email.');
+    } finally {
+      setIsResending(false);
+    }
+  };
+
   const handleOAuthLogin = (provider) => {
     const rawApiBase = import.meta.env.VITE_API_URL || '';
     const apiBase = rawApiBase.endsWith('/') ? rawApiBase.slice(0, -1) : rawApiBase;
@@ -73,11 +97,68 @@ export const Login = () => {
           </p>
         </div>
 
+        {/* Verification Success Banner */}
+        {isVerifiedNotice && (
+          <div
+            className="login-alert-banner"
+            style={{
+              borderColor: 'rgba(34, 197, 94, 0.4)',
+              backgroundColor: 'rgba(34, 197, 94, 0.1)',
+              color: '#4ade80',
+              marginBottom: '16px',
+            }}
+          >
+            <CheckCircle2 size={18} className="login-alert-icon" style={{ color: '#4ade80' }} />
+            <div className="login-alert-text">
+              Email verified successfully! You may now sign in with your credentials.
+            </div>
+          </div>
+        )}
+
+        {/* Resend Status Banner */}
+        {resendStatusMsg && (
+          <div
+            className="login-alert-banner"
+            style={{
+              borderColor: 'rgba(34, 197, 94, 0.4)',
+              backgroundColor: 'rgba(34, 197, 94, 0.1)',
+              color: '#4ade80',
+              marginBottom: '16px',
+            }}
+          >
+            <CheckCircle2 size={18} className="login-alert-icon" style={{ color: '#4ade80' }} />
+            <div className="login-alert-text">{resendStatusMsg}</div>
+          </div>
+        )}
+
         {/* Error Alert Banner */}
         {errorMsg && (
           <div className="login-alert-banner">
             <AlertTriangle size={18} className="login-alert-icon" />
-            <div className="login-alert-text">{errorMsg}</div>
+            <div className="login-alert-text">
+              <div>{errorMsg}</div>
+              {errorMsg.toLowerCase().includes('not been verified') && (
+                <div style={{ marginTop: '8px' }}>
+                  <button
+                    type="button"
+                    onClick={handleResendVerification}
+                    disabled={isResending}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--accent-cyan)',
+                      textDecoration: 'underline',
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                      padding: 0,
+                      fontWeight: 600,
+                    }}
+                  >
+                    {isResending ? 'Sending verification email...' : 'Resend verification link \u2192'}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -199,11 +280,15 @@ export const Login = () => {
           </button>
         </div>
 
-        {/* Security Disclaimers */}
-        <div className="login-footer-notice">
-          <strong>Enterprise Access Control:</strong> Public self-registration is disabled.
-          All accounts must be provisioned by a SOC Administrator.
-          Social logins require a pre-registered verified enterprise email.
+        {/* Public Registration Link & Notice */}
+        <div className="login-footer-notice" style={{ textAlign: 'center' }}>
+          Don't have an account?{' '}
+          <Link to="/register" style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>
+            Create an Account
+          </Link>
+          <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--text-muted)' }}>
+            Public demo accounts are provisioned with Demo Analyst access to explore the SOC platform.
+          </div>
         </div>
       </div>
     </div>
