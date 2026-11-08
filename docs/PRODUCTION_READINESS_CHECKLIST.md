@@ -30,10 +30,10 @@ The platform has been successfully transformed from an enterprise invite-only mo
 | Test Suite | Purpose | Tests | Result | Status |
 |---|---|:---:|:---:|:---:|
 | `test_public_registration_and_social.py` | Public signup, immediate login, social OAuth, feed/report isolation, quotas, killswitch, and Demo Analyst RBAC | 30 | 30 / 30 PASS | 🟢 PASSED |
-| `test_auth_rbac.py` | Enterprise sessions, Argon2id, CSRF, admin access, audit immutability, OAuth headers | 29 | 29 / 29 PASS | 🟢 PASSED |
+| `test_auth_rbac.py` | Enterprise sessions, Argon2id, CSRF, admin access, audit immutability, OAuth headers, graceful unconfigured OAuth redirect | 30 | 30 / 30 PASS | 🟢 PASSED |
 | `test_api_endpoints.py` | Business logic, coverage matrix, feeds ingest, SSRF protection, RAG diagnostics | 6 | 6 / 6 PASS | 🟢 PASSED |
-| **Total Automated Tests** | **Comprehensive Regression & Feature Testing** | **65** | **65 / 65 PASS (100%)** | 🟢 **ALL PASS** |
-| **Frontend Production Build** | Vite 5.4.21 bundle compilation (CSS/JS chunks, JSX routing) | 2,386 modules | Built in 3.98s, 0 errors | 🟢 **PASSED** |
+| **Total Automated Tests** | **Comprehensive Regression & Feature Testing** | **66** | **66 / 66 PASS (100%)** | 🟢 **ALL PASS** |
+| **Frontend Production Build** | Vite 5.4.21 bundle compilation (CSS/JS chunks, JSX routing) | 2,386 modules | Built in 4.24s, 0 errors | 🟢 **PASSED** |
 
 ---
 
@@ -119,7 +119,7 @@ The platform has been successfully transformed from an enterprise invite-only mo
 
 ### Overall Assessment: 🟢 **GO FOR STAGING DEPLOYMENT**
 
-The system meets all security, functional, architectural, cost-protection, and multi-tenant isolation criteria. All 65 automated tests pass with 100% success rate, the frontend compiles cleanly, and no destructive production operations were performed.
+The system meets all security, functional, architectural, cost-protection, and multi-tenant isolation criteria. All 66 automated tests pass with 100% success rate, the frontend compiles cleanly, and no destructive production operations were performed.
 
 ### Pre-Flight Staging Checklist:
 1. Ensure `EMAIL_PROVIDER=console` or `smtp` is configured in the staging environment.

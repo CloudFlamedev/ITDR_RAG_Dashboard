@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { apiClient, getApiBase } from '../api/client';
 import {
@@ -28,6 +28,11 @@ export const Register = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
   const [successMsg, setSuccessMsg] = useState(null);
+  const [providers, setProviders] = useState(null);
+
+  useEffect(() => {
+    apiClient.getProviders().then(setProviders).catch(() => {});
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -97,6 +102,14 @@ export const Register = () => {
   };
 
   const handleOAuthLogin = (provider) => {
+    if (providers && providers[provider] === false) {
+      const providerName = provider === 'google' ? 'Google' : 'GitHub';
+      const envVar = provider === 'google' ? 'GOOGLE_CLIENT_ID' : 'GITHUB_CLIENT_ID';
+      setErrorMsg(
+        `${providerName} OAuth is not configured on this server (missing ${envVar}). Please register with email and password below.`
+      );
+      return;
+    }
     const apiBase = getApiBase();
     window.location.href = `${apiBase}/api/auth/oauth/${provider}/login`;
   };

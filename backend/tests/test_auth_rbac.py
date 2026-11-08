@@ -492,6 +492,31 @@ def test_oauth_login_redirect_and_cookies(client, monkeypatch):
     assert invalid_res.status_code == 400
 
 
+def test_oauth_unconfigured_credentials_graceful_redirect(client, monkeypatch):
+    """Test that missing OAuth client IDs redirect to login with error rather than returning raw 501 JSON."""
+    monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", None)
+    monkeypatch.setattr(settings, "GITHUB_CLIENT_ID", None)
+
+    # 1. Check providers endpoint
+    r_providers = client.get("/api/auth/providers")
+    assert r_providers.status_code == 200
+    data = r_providers.json()
+    assert data["google"] is False
+    assert data["github"] is False
+
+    # 2. Test Google unconfigured redirect
+    res_google = client.get("/api/auth/oauth/google/login", follow_redirects=False)
+    assert res_google.status_code == 302
+    assert "/login?error=" in res_google.headers["location"]
+    assert "GOOGLE_CLIENT_ID" in res_google.headers["location"]
+
+    # 3. Test GitHub unconfigured redirect
+    res_github = client.get("/api/auth/oauth/github/login", follow_redirects=False)
+    assert res_github.status_code == 302
+    assert "/login?error=" in res_github.headers["location"]
+    assert "GITHUB_CLIENT_ID" in res_github.headers["location"]
+
+
 def test_oauth_callback_tampered_state(client):
     """Test rejection when OAuth state token is missing or tampered."""
     callback_res = client.get(

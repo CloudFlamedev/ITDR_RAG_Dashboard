@@ -30,7 +30,13 @@ export const Login = () => {
   const [isVerifiedNotice, setIsVerifiedNotice] = useState(searchParams.get('verified') === 'true');
   const [isRegisteredNotice, setIsRegisteredNotice] = useState(searchParams.get('registered') === 'true');
 
+  const [providers, setProviders] = useState(null);
+
   const destination = location.state?.from?.pathname || '/';
+
+  useEffect(() => {
+    apiClient.getProviders().then(setProviders).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -59,6 +65,14 @@ export const Login = () => {
   };
 
   const handleOAuthLogin = (provider) => {
+    if (providers && providers[provider] === false) {
+      const providerName = provider === 'google' ? 'Google' : 'GitHub';
+      const envVar = provider === 'google' ? 'GOOGLE_CLIENT_ID' : 'GITHUB_CLIENT_ID';
+      setErrorMsg(
+        `${providerName} OAuth is not configured on this server (missing ${envVar}). Please use email/password login or click the Demo Reviewer button below.`
+      );
+      return;
+    }
     const apiBase = getApiBase();
     window.location.href = `${apiBase}/api/auth/oauth/${provider}/login`;
   };
@@ -249,6 +263,30 @@ export const Login = () => {
           </Link>
           <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--text-muted)' }}>
             Public demo accounts are provisioned with Demo Analyst access to explore the SOC platform.
+          </div>
+          <div style={{ marginTop: '12px', borderTop: '1px solid rgba(255, 255, 255, 0.1)', paddingTop: '10px' }}>
+            <button
+              type="button"
+              onClick={() => {
+                setEmail('demo.analyst@itdr.local');
+                setPassword('DemoAnalyst2026!');
+                setErrorMsg(null);
+              }}
+              style={{
+                background: 'rgba(20, 184, 166, 0.1)',
+                border: '1px dashed var(--accent-teal)',
+                borderRadius: '6px',
+                padding: '6px 12px',
+                color: 'var(--accent-teal)',
+                fontSize: '12px',
+                cursor: 'pointer',
+                fontWeight: 500,
+                width: '100%',
+                transition: 'all 0.2s',
+              }}
+            >
+              Demo Reviewer? Auto-Fill Demo Credentials
+            </button>
           </div>
         </div>
       </div>

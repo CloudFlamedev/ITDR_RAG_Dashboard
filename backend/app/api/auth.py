@@ -547,6 +547,19 @@ def get_csrf(
 # Social Login / OAuth Endpoints
 # ------------------------------------------------------------------------------
 
+@router.get("/providers")
+def get_auth_providers() -> Dict[str, Any]:
+    """
+    Public endpoint reporting which authentication methods and OAuth providers
+    are currently configured and enabled on this deployment.
+    """
+    return {
+        "google": bool(settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET),
+        "github": bool(settings.GITHUB_CLIENT_ID and settings.GITHUB_CLIENT_SECRET),
+        "public_registration": settings.PUBLIC_REGISTRATION_ENABLED,
+    }
+
+
 @router.get("/oauth/{provider}/login")
 def oauth_login(
     provider: str,
@@ -572,38 +585,43 @@ def oauth_login(
     else:
         redirect_uri = f"{origin}/api/auth/oauth/{provider}/callback"
 
-    # Set state in a short-lived cookie for validation on callback
-    redirect_resp: RedirectResponse
+    try:
+        if provider == "google":
+            code_verifier, code_challenge = generate_pkce_pair()
+            auth_url = oauth_service.get_google_auth_url(state=state, code_challenge=code_challenge, redirect_uri=redirect_uri)
+            redirect_resp = RedirectResponse(url=auth_url, status_code=status.HTTP_302_FOUND)
+            # Store code_verifier in secure cookie for token exchange
+            redirect_resp.set_cookie(
+                key="itdr_pkce_verifier",
+                value=code_verifier,
+                max_age=600,
+                path="/",
+                secure=is_secure,
+                httponly=True,
+                samesite="lax",
+            )
+        else:  # github
+            auth_url = oauth_service.get_github_auth_url(state=state, redirect_uri=redirect_uri)
+            redirect_resp = RedirectResponse(url=auth_url, status_code=status.HTTP_302_FOUND)
 
-    if provider == "google":
-        code_verifier, code_challenge = generate_pkce_pair()
-        auth_url = oauth_service.get_google_auth_url(state=state, code_challenge=code_challenge, redirect_uri=redirect_uri)
-        redirect_resp = RedirectResponse(url=auth_url, status_code=status.HTTP_302_FOUND)
-        # Store code_verifier in secure cookie for token exchange
+        # Set state cookie
         redirect_resp.set_cookie(
-            key="itdr_pkce_verifier",
-            value=code_verifier,
+            key="itdr_oauth_state",
+            value=state,
             max_age=600,
             path="/",
             secure=is_secure,
             httponly=True,
             samesite="lax",
         )
-    else:  # github
-        auth_url = oauth_service.get_github_auth_url(state=state, redirect_uri=redirect_uri)
-        redirect_resp = RedirectResponse(url=auth_url, status_code=status.HTTP_302_FOUND)
-
-    # Set state cookie
-    redirect_resp.set_cookie(
-        key="itdr_oauth_state",
-        value=state,
-        max_age=600,
-        path="/",
-        secure=is_secure,
-        httponly=True,
-        samesite="lax",
-    )
-    return redirect_resp
+        return redirect_resp
+    except HTTPException as e:
+        logger.warning(f"OAuth initiation failed for {provider}: {e.detail}")
+        from urllib.parse import quote_plus
+        return RedirectResponse(
+            url=f"{origin}/login?error={quote_plus(e.detail)}",
+            status_code=status.HTTP_302_FOUND,
+        )
 
 
 @router.get("/oauth/{provider}/callback")

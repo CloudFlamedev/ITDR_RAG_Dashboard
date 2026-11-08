@@ -190,12 +190,12 @@ Database-level immutability is guaranteed by trigger `trg_audit_logs_immutable` 
 
 ## 7. Automated Test Coverage Summary
 
-Total automated tests passing: **65 / 65 tests (100% Pass Rate)**
+Total automated tests passing: **66 / 66 tests (100% Pass Rate)**
 
 | Test Suite | File | Tests | Execution Time | Result |
 |---|---|:---:|:---:|:---:|
 | Public Registration & Social Auth | `test_public_registration_and_social.py` | 30 | ~275s | 🟢 **30/30 PASS** |
-| Core Authentication & RBAC Hardening | `test_auth_rbac.py` | 29 | 196.83s | 🟢 **29/29 PASS** |
-| API Regression & Business Logic | `test_api_endpoints.py` | 6 | 154.69s | 🟢 **6/6 PASS** |
-| Frontend Production Build | Vite 5.4.21 | 2,386 modules | 3.98s | 🟢 **0 ERRORS** |
+| Core Authentication & RBAC Hardening | `test_auth_rbac.py` | 30 | ~240s | 🟢 **30/30 PASS** |
+| API Regression & Business Logic | `test_api_endpoints.py` | 6 | 179.40s | 🟢 **6/6 PASS** |
+| Frontend Production Build | Vite 5.4.21 | 2,386 modules | 4.24s | 🟢 **0 ERRORS** |
 

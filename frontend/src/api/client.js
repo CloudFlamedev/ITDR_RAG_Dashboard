@@ -113,6 +113,7 @@ export const apiClient = {
   getMe: () => api.get('/api/auth/me').then((r) => r.data),
   getCsrf: () => api.get('/api/auth/csrf').then((r) => r.data),
   getLiveness: () => api.get('/health').then((r) => r.data),
+  getProviders: () => api.get('/api/auth/providers').then((r) => r.data),
 
   // User Management (Admin only)
   getUsers: (params = {}) => api.get('/api/users', { params }).then((r) => r.data),
