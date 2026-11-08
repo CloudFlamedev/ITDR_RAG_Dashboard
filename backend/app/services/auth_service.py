@@ -1,9 +1,10 @@
 import datetime
 import time
 import logging
+import threading
 from typing import Optional, Tuple, List, Dict, Any
 from fastapi import HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import text
 
 from app.core.config import get_settings
@@ -16,7 +17,7 @@ from app.core.security import (
     hash_verification_token,
 )
 from app.core.rate_limiter import login_rate_limiter
-from app.models.auth import User, Role, UserSession, AuthIdentity, AuditLog, EmailVerificationToken
+from app.models.auth import User, Role, Permission, UserSession, AuthIdentity, AuditLog, EmailVerificationToken
 from app.services.email_service import email_service
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,12 @@ settings = get_settings()
 
 # In-memory store for verification resend cooldown
 _resend_rate_limiter: Dict[str, float] = {}
+
+# Thread-safe in-memory cache for validated sessions to eliminate Neon DB round-trips
+_session_cache_lock = threading.Lock()
+# Maps token_hash -> dict of primitive session and user attributes
+_SESSION_CACHE: Dict[str, Dict[str, Any]] = {}
+_SESSION_CACHE_TTL_SECONDS = 15.0
 
 # Dummy Argon2id hash for constant-time comparison when user does not exist
 DUMMY_PASSWORD_HASH = "$argon2id$v=19$m=65536,t=2,p=2$dummyhashfordummyuserdummyhash$dummyhashfordummyuserdummyhashdummyhashdummy"
@@ -172,7 +179,7 @@ class AuthService:
     def validate_session(self, raw_session_token: str) -> Optional[Tuple[User, UserSession]]:
         """
         Validate incoming session token against PostgreSQL:
-        - Checks hash existence
+        - Checks in-memory fast cache first to avoid remote DB latency
         - Validates expiration and revocation
         - Enforces sliding inactivity window
         - Ensures user is still active
@@ -181,41 +188,134 @@ class AuthService:
             return None
 
         token_hash = hash_session_token(raw_session_token)
+        now_mono = time.monotonic()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        inactivity_limit = datetime.timedelta(minutes=settings.SESSION_INACTIVITY_MINUTES)
+
+        # 1. In-memory fast cache lookup using primitive values
+        with _session_cache_lock:
+            cached_data = _SESSION_CACHE.get(token_hash)
+            if cached_data:
+                cached_time = cached_data.get("cached_time", 0.0)
+                if (now_mono - cached_time) < _SESSION_CACHE_TTL_SECONDS:
+                    expires_at = cached_data["expires_at"]
+                    last_activity_at = cached_data["last_activity_at"]
+                    is_active = cached_data["is_active"]
+                    revoked_at = cached_data["revoked_at"]
+
+                    if (
+                        expires_at > now_utc
+                        and (now_utc - last_activity_at) <= inactivity_limit
+                        and is_active
+                        and revoked_at is None
+                    ):
+                        u = User(
+                            id=cached_data["user_id"],
+                            email=cached_data["email"],
+                            full_name=cached_data["full_name"],
+                            is_active=cached_data["is_active"],
+                            is_verified=cached_data["is_verified"],
+                            created_at=cached_data["user_created_at"],
+                            updated_at=cached_data["user_updated_at"],
+                            last_login_at=cached_data["user_last_login_at"],
+                        )
+                        roles = []
+                        for role_id, role_name, perm_keys in cached_data["roles"]:
+                            r = Role(id=role_id, name=role_name)
+                            r.permissions = [Permission(permission_key=pk) for pk in perm_keys]
+                            roles.append(r)
+                        u.roles = roles
+
+                        s = UserSession(
+                            id=cached_data["session_id"],
+                            user_id=cached_data["user_id"],
+                            session_token_hash=cached_data["session_token_hash"],
+                            expires_at=cached_data["expires_at"],
+                            last_activity_at=cached_data["last_activity_at"],
+                            revoked_at=cached_data["revoked_at"],
+                            ip_address=cached_data["ip_address"],
+                            user_agent=cached_data["user_agent"],
+                            created_at=cached_data["session_created_at"],
+                        )
+                        s.user = u
+                        return u, s
+                    else:
+                        _SESSION_CACHE.pop(token_hash, None)
+
+        # 2. Query DB with eager relationships
         session = (
             self.db.query(UserSession)
+            .options(
+                joinedload(UserSession.user)
+                .selectinload(User.roles)
+                .selectinload(Role.permissions)
+            )
             .filter(UserSession.session_token_hash == token_hash)
             .first()
         )
 
         if not session or session.revoked_at is not None:
+            with _session_cache_lock:
+                _SESSION_CACHE.pop(token_hash, None)
             return None
 
-        now = datetime.datetime.now(datetime.timezone.utc)
-
-        # 1. Absolute expiration check
-        if session.expires_at <= now:
-            session.revoked_at = now
+        # 3. Absolute expiration check
+        if session.expires_at <= now_utc:
+            session.revoked_at = now_utc
             self.db.commit()
+            with _session_cache_lock:
+                _SESSION_CACHE.pop(token_hash, None)
             return None
 
-        # 2. Sliding inactivity timeout check
-        inactivity_limit = datetime.timedelta(minutes=settings.SESSION_INACTIVITY_MINUTES)
-        if (now - session.last_activity_at) > inactivity_limit:
-            session.revoked_at = now
+        # 4. Sliding inactivity timeout check
+        if (now_utc - session.last_activity_at) > inactivity_limit:
+            session.revoked_at = now_utc
             self.db.commit()
+            with _session_cache_lock:
+                _SESSION_CACHE.pop(token_hash, None)
             return None
 
-        # 3. User active check
+        # 5. User active check
         user = session.user
         if not user or not user.is_active:
-            session.revoked_at = now
+            session.revoked_at = now_utc
             self.db.commit()
+            with _session_cache_lock:
+                _SESSION_CACHE.pop(token_hash, None)
             return None
 
-        # 4. Slide activity timestamp (only update if > 30s since last write to reduce DB chatter)
-        if (now - session.last_activity_at).total_seconds() > 30:
-            session.last_activity_at = now
+        # 6. Slide activity timestamp (only update if > 30s since last write to reduce DB chatter)
+        if (now_utc - session.last_activity_at).total_seconds() > 30:
+            session.last_activity_at = now_utc
             self.db.commit()
+
+        # 7. Store valid session in in-memory cache as primitives
+        roles_data = []
+        for r in user.roles:
+            perm_keys = [p.permission_key for p in r.permissions]
+            roles_data.append((r.id, r.name, perm_keys))
+
+        with _session_cache_lock:
+            _SESSION_CACHE[token_hash] = {
+                "user_id": user.id,
+                "email": user.email,
+                "full_name": user.full_name,
+                "is_active": user.is_active,
+                "is_verified": user.is_verified,
+                "user_created_at": user.created_at,
+                "user_updated_at": user.updated_at,
+                "user_last_login_at": user.last_login_at,
+                "roles": roles_data,
+                "session_id": session.id,
+                "session_token_hash": session.session_token_hash,
+                "expires_at": session.expires_at,
+                "last_activity_at": session.last_activity_at,
+                "revoked_at": session.revoked_at,
+                "ip_address": session.ip_address,
+                "user_agent": session.user_agent,
+                "session_created_at": session.created_at,
+                "cached_time": now_mono,
+            }
 
         return user, session
 
@@ -225,6 +325,9 @@ class AuthService:
             return False
 
         token_hash = hash_session_token(raw_session_token)
+        with _session_cache_lock:
+            _SESSION_CACHE.pop(token_hash, None)
+
         session = (
             self.db.query(UserSession)
             .filter(UserSession.session_token_hash == token_hash)
@@ -245,6 +348,7 @@ class AuthService:
 
     def revoke_all_user_sessions(self, user_id: int) -> int:
         """Revoke all active sessions for a user (e.g. on deactivation or password change)."""
+        self.invalidate_cache_for_user(user_id)
         now = datetime.datetime.now(datetime.timezone.utc)
         count = (
             self.db.query(UserSession)
@@ -259,6 +363,23 @@ class AuthService:
             metadata={"revoked_count": count},
         )
         return count
+
+    @classmethod
+    def invalidate_cache_for_user(cls, user_id: int) -> None:
+        """Invalidate cached session entries for a specific user ID."""
+        with _session_cache_lock:
+            to_remove = [
+                th for th, entry in _SESSION_CACHE.items()
+                if entry.get("user_id") == user_id
+            ]
+            for th in to_remove:
+                _SESSION_CACHE.pop(th, None)
+
+    @classmethod
+    def clear_session_cache(cls) -> None:
+        """Clear all in-memory session cache entries."""
+        with _session_cache_lock:
+            _SESSION_CACHE.clear()
 
     def handle_oauth_user(
         self,

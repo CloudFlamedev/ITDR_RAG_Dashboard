@@ -1,3 +1,4 @@
+import time
 import datetime
 from typing import Dict, Any
 from fastapi import APIRouter, Depends
@@ -14,6 +15,9 @@ from app.api.deps import require_permission
 
 router = APIRouter(tags=["Health & Telemetry"])
 settings = get_settings()
+
+_kb_stats_cache: Dict[str, Any] = {"data": None, "cached_at": 0.0}
+_KB_CACHE_TTL = 60.0
 
 
 @router.get("/health")
@@ -39,30 +43,40 @@ def get_system_status(
     """
     db_health = check_db_health()
 
-    # Query KB statistics from database
-    kb_stats = {
-        "techniques_count": 0,
-        "tactics_count": 0,
-        "d3fend_count": 0,
-        "rules_count": 0,
-        "rag_indexed_chunks": 0,
-        "last_sync": None,
-    }
+    # Query KB statistics from database (with in-memory TTL cache)
+    now_mono = time.monotonic()
+    if (
+        _kb_stats_cache["data"] is not None
+        and (now_mono - _kb_stats_cache["cached_at"]) < _KB_CACHE_TTL
+    ):
+        kb_stats = dict(_kb_stats_cache["data"])
+    else:
+        kb_stats = {
+            "techniques_count": 0,
+            "tactics_count": 0,
+            "d3fend_count": 0,
+            "rules_count": 0,
+            "rag_indexed_chunks": 0,
+            "last_sync": None,
+        }
 
-    if db_health["connected"]:
-        try:
-            kb_stats["techniques_count"] = db.query(AttackTechnique).count()
-            kb_stats["tactics_count"] = db.query(AttackTactic).count()
-            kb_stats["d3fend_count"] = db.query(D3fendTechnique).count()
-            kb_stats["rules_count"] = db.query(DetectionRule).count()
-            kb_stats["rag_indexed_chunks"] = db.query(RagDocument).count()
+        if db_health["connected"]:
+            try:
+                kb_stats["techniques_count"] = db.query(AttackTechnique).count()
+                kb_stats["tactics_count"] = db.query(AttackTactic).count()
+                kb_stats["d3fend_count"] = db.query(D3fendTechnique).count()
+                kb_stats["rules_count"] = db.query(DetectionRule).count()
+                kb_stats["rag_indexed_chunks"] = db.query(RagDocument).count()
 
-            # Find latest update time in rag_documents
-            latest_doc = db.query(RagDocument.updated_at).order_by(RagDocument.updated_at.desc()).first()
-            if latest_doc and latest_doc[0]:
-                kb_stats["last_sync"] = latest_doc[0].isoformat()
-        except Exception as e:
-            kb_stats["error"] = str(e)
+                # Find latest update time in rag_documents
+                latest_doc = db.query(RagDocument.updated_at).order_by(RagDocument.updated_at.desc()).first()
+                if latest_doc and latest_doc[0]:
+                    kb_stats["last_sync"] = latest_doc[0].isoformat()
+
+                _kb_stats_cache["data"] = kb_stats
+                _kb_stats_cache["cached_at"] = now_mono
+            except Exception as e:
+                kb_stats["error"] = str(e)
 
     # Active LLM Status (Groq or xAI)
     llm_provider_name = "Groq" if settings.is_groq else "xAI Grok"

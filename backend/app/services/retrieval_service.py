@@ -1,7 +1,8 @@
 import re
 import logging
+import threading
 from typing import List, Dict, Any, Optional
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload, joinedload
 from app.models.attack import AttackTechnique
 from app.models.d3fend import D3fendTechnique, AttackDefenceMapping
 from app.models.rag import RagDocument
@@ -12,6 +13,10 @@ logger = logging.getLogger(__name__)
 
 ATTACK_ID_PATTERN = re.compile(r"\b(T\d{4}(?:\.\d{3})?)\b", re.IGNORECASE)
 D3FEND_ID_PATTERN = re.compile(r"\b(D3(?:A)?-[A-Z0-9]+)\b", re.IGNORECASE)
+
+# In-memory fast cache for static MITRE ATT&CK taxonomy
+_tech_cache_lock = threading.Lock()
+_TECH_TAXONOMY_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 class CandidateTechnique:
@@ -78,6 +83,34 @@ class RetrievalService:
             "d3fend_ids": sorted(list(set(raw_d3fend_ids))),
         }
 
+    def _get_technique_dict(self, tech_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve technique from fast in-memory taxonomy cache, pre-warming on first access."""
+        global _TECH_TAXONOMY_CACHE
+        with _tech_cache_lock:
+            if not _TECH_TAXONOMY_CACHE and self.db:
+                try:
+                    techs = (
+                        self.db.query(AttackTechnique)
+                        .options(selectinload(AttackTechnique.tactics))
+                        .all()
+                    )
+                    for t in techs:
+                        _TECH_TAXONOMY_CACHE[t.technique_id] = {
+                            "id": t.id,
+                            "technique_id": t.technique_id,
+                            "name": t.name,
+                            "tactics": [tac.name for tac in t.tactics],
+                            "url": t.url,
+                            "description": t.description or "",
+                        }
+                except Exception as e:
+                    logger.warning(f"Failed to pre-warm ATT&CK taxonomy cache: {e}")
+
+            entry = _TECH_TAXONOMY_CACHE.get(tech_id)
+            if not entry and "." in tech_id:
+                entry = _TECH_TAXONOMY_CACHE.get(tech_id.split(".")[0])
+            return entry
+
     def retrieve(
         self,
         advisory_text: str,
@@ -95,35 +128,27 @@ class RetrievalService:
 
         candidates_by_id: Dict[str, CandidateTechnique] = {}
 
-        # 1. Exact-ID Lookup Boost
-        if self.db:
-            for att_id in explicit_attack_ids:
-                tech = self.db.query(AttackTechnique).filter(
-                    (AttackTechnique.technique_id == att_id) |
-                    (AttackTechnique.technique_id.like(f"{att_id}%"))
-                ).first()
-
-                if tech:
-                    tactics = [t.name for t in tech.tactics]
-                    candidates_by_id[tech.technique_id] = CandidateTechnique(
-                        technique_id=tech.technique_id,
-                        name=tech.name,
-                        score=1.0,
-                        is_exact_match=True,
-                        tactics=tactics,
-                        url=tech.url or f"https://attack.mitre.org/techniques/{tech.technique_id}",
-                        description=tech.description or "",
-                        evidence_snippets=[{
-                            "source_id": f"att-tech-{tech.technique_id}",
-                            "title": f"Explicit indicator matched in submitted advisory: {tech.technique_id}",
-                            "excerpt": f"Advisory explicitly mentions {tech.technique_id}. {tech.description[:250]}...",
-                            "score": 1.0,
-                            "url": tech.url,
-                        }]
-                    )
-        else:
-            # Fallback for offline testing or without database session
-            for att_id in explicit_attack_ids:
+        # 1. Exact-ID Lookup Boost (from in-memory taxonomy cache)
+        for att_id in explicit_attack_ids:
+            tech = self._get_technique_dict(att_id)
+            if tech:
+                candidates_by_id[tech["technique_id"]] = CandidateTechnique(
+                    technique_id=tech["technique_id"],
+                    name=tech["name"],
+                    score=1.0,
+                    is_exact_match=True,
+                    tactics=tech["tactics"],
+                    url=tech["url"] or f"https://attack.mitre.org/techniques/{tech['technique_id']}",
+                    description=tech["description"],
+                    evidence_snippets=[{
+                        "source_id": f"att-tech-{tech['technique_id']}",
+                        "title": f"Explicit indicator matched in submitted advisory: {tech['technique_id']}",
+                        "excerpt": f"Advisory explicitly mentions {tech['technique_id']}. {tech['description'][:250]}...",
+                        "score": 1.0,
+                        "url": tech["url"],
+                    }]
+                )
+            else:
                 candidates_by_id[att_id] = CandidateTechnique(
                     technique_id=att_id,
                     name=f"Technique {att_id}",
@@ -131,7 +156,7 @@ class RetrievalService:
                     is_exact_match=True,
                     tactics=["Initial Access"],
                     url=f"https://attack.mitre.org/techniques/{att_id}",
-                    description=f"Offline indicator match for {att_id}",
+                    description=f"Indicator match for {att_id}",
                     evidence_snippets=[{
                         "source_id": f"att-tech-{att_id}",
                         "title": f"Explicit indicator matched: {att_id}",
@@ -152,21 +177,21 @@ class RetrievalService:
 
         for doc, score in vector_results:
             tech_id = doc.external_id
-            tech_rec = self.db.query(AttackTechnique).filter_by(technique_id=tech_id).first()
+            tech_rec = self._get_technique_dict(tech_id)
             if not tech_rec:
                 continue
 
-            tactics = [t.name for t in tech_rec.tactics]
+            tactics = tech_rec["tactics"]
 
             if tech_id not in candidates_by_id:
                 candidates_by_id[tech_id] = CandidateTechnique(
                     technique_id=tech_id,
-                    name=tech_rec.name,
+                    name=tech_rec["name"],
                     score=score,
                     is_exact_match=False,
                     tactics=tactics,
-                    url=tech_rec.url or f"https://attack.mitre.org/techniques/{tech_id}",
-                    description=tech_rec.description or "",
+                    url=tech_rec["url"] or f"https://attack.mitre.org/techniques/{tech_id}",
+                    description=tech_rec["description"],
                     evidence_snippets=[],
                 )
             else:
@@ -230,27 +255,34 @@ class RetrievalService:
         countermeasures = []
         seen_d3f_ids = set()
 
-        # A. Exact MITRE D3FEND mappings for the candidate techniques
+        # A. Exact MITRE D3FEND mappings for candidate techniques (batched in 1 single query)
+        all_att_ids = set()
         for att_id in candidate_technique_ids:
-            mappings = self.db.query(AttackDefenceMapping).filter(
-                (AttackDefenceMapping.attack_technique_external_id == att_id) |
-                (AttackDefenceMapping.attack_technique_external_id == att_id.split(".")[0])
-            ).all()
+            all_att_ids.add(att_id)
+            if "." in att_id:
+                all_att_ids.add(att_id.split(".")[0])
 
-            for m in mappings:
-                d3f = m.d3fend_technique
-                if d3f.d3fend_id not in seen_d3f_ids:
-                    seen_d3f_ids.add(d3f.d3fend_id)
-                    countermeasures.append({
-                        "d3fend_id": d3f.d3fend_id,
-                        "name": d3f.name,
-                        "relationship_type": m.relationship_type,
-                        "provenance": m.mapping_source,
-                        "provenance_url": m.provenance_url,
-                        "definition": d3f.definition or "",
-                        "url": d3f.url,
-                        "matched_via": f"Official mapping to {att_id}",
-                    })
+        mappings = (
+            self.db.query(AttackDefenceMapping)
+            .options(joinedload(AttackDefenceMapping.d3fend_technique))
+            .filter(AttackDefenceMapping.attack_technique_external_id.in_(all_att_ids))
+            .all()
+        )
+
+        for m in mappings:
+            d3f = m.d3fend_technique
+            if d3f and d3f.d3fend_id not in seen_d3f_ids:
+                seen_d3f_ids.add(d3f.d3fend_id)
+                countermeasures.append({
+                    "d3fend_id": d3f.d3fend_id,
+                    "name": d3f.name,
+                    "relationship_type": m.relationship_type,
+                    "provenance": m.mapping_source,
+                    "provenance_url": m.provenance_url,
+                    "definition": d3f.definition or "",
+                    "url": d3f.url,
+                    "matched_via": f"Official mapping to {m.attack_technique_external_id}",
+                })
 
         # B. Semantic vector search over D3FEND documents
         d3f_vector_results = self.vector_store.similarity_search(

@@ -263,6 +263,7 @@ def update_user(
     user.updated_at = datetime.datetime.now(datetime.timezone.utc)
     db.commit()
     db.refresh(user)
+    auth_svc.invalidate_cache_for_user(user.id)
 
     auth_svc.log_audit_event(
         user_id=current_user.id,
@@ -324,6 +325,7 @@ def update_user_roles(
     db.refresh(user)
 
     auth_svc = AuthService(db)
+    auth_svc.invalidate_cache_for_user(user.id)
     auth_svc.log_audit_event(
         user_id=current_user.id,
         action="user_roles_updated",

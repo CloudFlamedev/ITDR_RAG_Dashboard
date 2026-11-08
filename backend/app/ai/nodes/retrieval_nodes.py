@@ -1,7 +1,7 @@
 import time
 import datetime
 from typing import Dict, Any, List
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from app.ai.state import ThreatAnalysisState
 from app.services.retrieval_service import RetrievalService
 from app.models.coverage import DetectionRuleTechnique, DetectionRule
@@ -113,22 +113,33 @@ def rank_and_deduplicate_candidates(state: ThreatAnalysisState) -> Dict[str, Any
     coverage_assessments = []
     db: Session = SessionLocal()
     try:
+        candidate_tids = [c["technique_id"] for c in candidates]
+        all_target_tids = set(candidate_tids)
+        for tid in candidate_tids:
+            if "." in tid:
+                all_target_tids.add(tid.split(".")[0])
+
+        all_mappings = (
+            db.query(DetectionRuleTechnique)
+            .options(joinedload(DetectionRuleTechnique.rule))
+            .join(DetectionRule)
+            .filter(DetectionRuleTechnique.technique_external_id.in_(all_target_tids))
+            .filter(DetectionRule.enabled.is_(True))
+            .all()
+        )
+
+        mappings_by_tid: Dict[str, List[DetectionRuleTechnique]] = {}
+        for m in all_mappings:
+            mappings_by_tid.setdefault(m.technique_external_id, []).append(m)
+
         for cand in candidates:
             tid = cand["technique_id"]
-            # Look up active rules protecting this technique
-            mappings = (
-                db.query(DetectionRuleTechnique)
-                .join(DetectionRule)
-                .filter(
-                    (DetectionRuleTechnique.technique_external_id == tid) |
-                    (DetectionRuleTechnique.technique_external_id == tid.split(".")[0])
-                )
-                .filter(DetectionRule.enabled.is_(True))
-                .all()
-            )
+            direct_maps = mappings_by_tid.get(tid, [])
+            parent_maps = mappings_by_tid.get(tid.split(".")[0], []) if "." in tid else []
+            combined_mappings = direct_maps + [m for m in parent_maps if m not in direct_maps]
 
-            tools = sorted(list(set(m.rule.tool for m in mappings)))
-            rule_count = len(mappings)
+            tools = sorted(list(set(m.rule.tool for m in combined_mappings)))
+            rule_count = len(combined_mappings)
 
             status = "exposed"
             gap_summary = f"No active detection rules mapped to {tid}"

@@ -1,11 +1,20 @@
+import time
 import logging
-from typing import Dict, Any, List
-from sqlalchemy.orm import Session
+import threading
+from typing import Dict, Any, List, Tuple
+from sqlalchemy.orm import Session, selectinload, joinedload
 from app.models.attack import AttackTechnique, AttackTactic
 from app.models.coverage import DetectionRule, DetectionRuleTechnique
 from app.models.feeds import ThreatScenario, ThreatFeed
 
 logger = logging.getLogger(__name__)
+
+# Thread-safe in-memory cache for dashboard views
+_dashboard_cache_lock = threading.Lock()
+_RESILIENCE_OVERVIEW_CACHE: Dict[Tuple, Tuple[Dict[str, Any], float]] = {}
+_THREAT_EXPOSURE_CACHE: Dict[Tuple, Tuple[Dict[str, Any], float]] = {}
+_THREAT_SCENARIOS_CACHE: Dict[Tuple, Tuple[Dict[str, Any], float]] = {}
+_DASHBOARD_CACHE_TTL = 60.0  # 60s TTL
 
 
 class DashboardService:
@@ -27,8 +36,19 @@ class DashboardService:
         Screen 1: Identity Resilience Dashboard.
         Computes coverage ring gauge, tactic exposure bars, quadrant points, and critical blind spots.
         """
-        # 1. In-Scope Techniques
-        tech_query = self.db.query(AttackTechnique).filter_by(revoked=False, deprecated=False)
+        cache_key = (client_restriction, itdr_scope, view_mode)
+        now_mono = time.monotonic()
+        with _dashboard_cache_lock:
+            cached = _RESILIENCE_OVERVIEW_CACHE.get(cache_key)
+            if cached and (now_mono - cached[1]) < _DASHBOARD_CACHE_TTL:
+                return cached[0]
+
+        # 1. In-Scope Techniques with eager tactics loading
+        tech_query = (
+            self.db.query(AttackTechnique)
+            .options(selectinload(AttackTechnique.tactics))
+            .filter_by(revoked=False, deprecated=False)
+        )
         if itdr_scope == "ITDR Scope Only":
             tech_query = tech_query.filter(AttackTechnique.is_identity_relevant.is_(True))
 
@@ -54,8 +74,13 @@ class DashboardService:
 
         coverage_score = round((len(covered_techniques) / total_techniques * 100), 1) if total_techniques > 0 else 0.0
 
-        # 3. ATT&CK Tactic Exposure Bars (Covered vs Exposed counts per tactic)
-        tactics = self.db.query(AttackTactic).order_by(AttackTactic.name).all()
+        # 3. ATT&CK Tactic Exposure Bars (Covered vs Exposed counts per tactic with eager techniques)
+        tactics = (
+            self.db.query(AttackTactic)
+            .options(selectinload(AttackTactic.techniques))
+            .order_by(AttackTactic.name)
+            .all()
+        )
         tactic_bars = []
         for tac in tactics:
             tac_techniques = [
@@ -110,7 +135,7 @@ class DashboardService:
         # Total active rules
         active_rules_count = self.db.query(DetectionRule).filter_by(enabled=True).count()
 
-        return {
+        overview = {
             "filters": {
                 "client_restriction": client_restriction,
                 "itdr_scope": itdr_scope,
@@ -129,6 +154,11 @@ class DashboardService:
             "critical_blind_spots": critical_blind_spots,
         }
 
+        with _dashboard_cache_lock:
+            _RESILIENCE_OVERVIEW_CACHE[cache_key] = (overview, now_mono)
+
+        return overview
+
     def get_threat_exposure_report(
         self,
         client_restriction: str = "ALL",
@@ -138,6 +168,13 @@ class DashboardService:
         Screen 3: Identity Threat Exposure.
         Extracts sighted TTPs from CTI bulletins and evaluates their covered/exposed status.
         """
+        cache_key = (client_restriction, itdr_scope)
+        now_mono = time.monotonic()
+        with _dashboard_cache_lock:
+            cached = _THREAT_EXPOSURE_CACHE.get(cache_key)
+            if cached and (now_mono - cached[1]) < _DASHBOARD_CACHE_TTL:
+                return cached[0]
+
         # Get active covered IDs
         rule_mappings = (
             self.db.query(DetectionRuleTechnique.technique_external_id)
@@ -166,16 +203,28 @@ class DashboardService:
         for k, v in default_sightings.items():
             sightings_by_ttp[k] = sightings_by_ttp.get(k, v)
 
+        # Batch query all sighted techniques in a single query
+        target_ids = set()
+        for ttp_id in sightings_by_ttp.keys():
+            target_ids.add(ttp_id)
+            if "." in ttp_id:
+                target_ids.add(ttp_id.split(".")[0])
+
+        batch_techs = (
+            self.db.query(AttackTechnique)
+            .options(selectinload(AttackTechnique.tactics))
+            .filter(AttackTechnique.technique_id.in_(target_ids))
+            .all()
+        )
+        tech_by_id = {t.technique_id: t for t in batch_techs}
+
         # Build cards grouped by tactic
         sighted_cards = []
         covered_sighted = 0
         exposed_sighted = 0
 
         for ttp_id, count in sightings_by_ttp.items():
-            tech = self.db.query(AttackTechnique).filter(
-                (AttackTechnique.technique_id == ttp_id) |
-                (AttackTechnique.technique_id == ttp_id.split(".")[0])
-            ).first()
+            tech = tech_by_id.get(ttp_id) or tech_by_id.get(ttp_id.split(".")[0])
 
             if not tech:
                 continue
@@ -207,7 +256,7 @@ class DashboardService:
             phase = card["primary_tactic"]
             phase_groups.setdefault(phase, []).append(card)
 
-        return {
+        report = {
             "summary": {
                 "total_ttps_sighted": len(sighted_cards),
                 "sighted_with_coverage": covered_sighted,
@@ -223,6 +272,11 @@ class DashboardService:
             "all_sighted_techniques": sighted_cards,
         }
 
+        with _dashboard_cache_lock:
+            _THREAT_EXPOSURE_CACHE[cache_key] = (report, now_mono)
+
+        return report
+
     def get_threat_scenarios_report(
         self,
         client_restriction: str = "ALL",
@@ -232,6 +286,13 @@ class DashboardService:
         Screen 4: Identity Threat Scenarios.
         2D Resilience Quadrant mapping (Detection % vs Mitigation %).
         """
+        cache_key = (client_restriction, itdr_scope)
+        now_mono = time.monotonic()
+        with _dashboard_cache_lock:
+            cached = _THREAT_SCENARIOS_CACHE.get(cache_key)
+            if cached and (now_mono - cached[1]) < _DASHBOARD_CACHE_TTL:
+                return cached[0]
+
         scenarios = self.db.query(ThreatScenario).all()
 
         scenario_list = []
@@ -255,8 +316,13 @@ class DashboardService:
             st = s["status"]
             status_counts[st] = status_counts.get(st, 0) + 1
 
-        return {
+        scenarios_report = {
             "total_scenarios": len(scenario_list),
             "status_breakdown": status_counts,
             "scenarios": scenario_list,
         }
+
+        with _dashboard_cache_lock:
+            _THREAT_SCENARIOS_CACHE[cache_key] = (scenarios_report, now_mono)
+
+        return scenarios_report

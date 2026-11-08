@@ -1,9 +1,13 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import apiClient from '../api/client';
+import { useAuth } from './AuthContext';
 
 const FilterContext = createContext();
 
 export const FilterProvider = ({ children }) => {
+  const auth = useAuth();
+  const isAdmin = Boolean(auth?.user?.roles?.includes('Admin'));
+
   // Global Top Bar States
   const [viewMode, setViewMode] = useState(() => localStorage.getItem('itdr_view_mode') || 'ClientReq');
   const [clientRestriction, setClientRestriction] = useState('ALL');
@@ -34,15 +38,13 @@ export const FilterProvider = ({ children }) => {
     localStorage.setItem('itdr_view_mode', viewMode);
   }, [viewMode]);
 
-  // Poll system status
+  // Poll system status efficiently without hitting 403 errors
   const fetchStatus = async () => {
     try {
-      const data = await apiClient.getSystemStatus();
-      setSystemStatus(data);
-    } catch (err) {
-      // If 403 (Demo Analyst / non-admin) or 401, fallback to lightweight health check
-      // so topbar displays online status instead of falsely reporting DB: Offline.
-      try {
+      if (isAdmin) {
+        const data = await apiClient.getSystemStatus();
+        setSystemStatus(data);
+      } else {
         const health = await apiClient.getLiveness();
         if (health?.status === 'healthy') {
           setSystemStatus({
@@ -56,9 +58,9 @@ export const FilterProvider = ({ children }) => {
             },
           });
         }
-      } catch (healthErr) {
-        console.warn('System status fetch failed:', err);
       }
+    } catch (err) {
+      console.warn('System status fetch error:', err);
     } finally {
       setStatusLoading(false);
     }
@@ -68,7 +70,7 @@ export const FilterProvider = ({ children }) => {
     fetchStatus();
     const interval = setInterval(fetchStatus, 30000); // 30s heartbeat
     return () => clearInterval(interval);
-  }, []);
+  }, [isAdmin]);
 
   const toggleTheme = () => {
     setTheme(prev => (prev === 'light' ? 'dark' : 'light'));

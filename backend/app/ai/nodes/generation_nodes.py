@@ -82,9 +82,10 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                             api_key=settings.effective_llm_key,
                             base_url=settings.effective_llm_base,
                             model=test_model,
-                            timeout=settings.XAI_TIMEOUT_SECONDS,
+                            timeout=12,
                             temperature=0.1,
-                            max_tokens=950,
+                            max_tokens=650,
+                            max_retries=2,
                         )
                     else:
                         from langchain_xai import ChatXAI
@@ -92,9 +93,9 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                             xai_api_key=settings.effective_llm_key,
                             xai_api_base=settings.effective_llm_base,
                             model=test_model,
-                            timeout=settings.XAI_TIMEOUT_SECONDS,
+                            timeout=12,
                             temperature=0.1,
-                            max_tokens=950,
+                            max_tokens=650,
                         )
 
                     lc_messages = [
