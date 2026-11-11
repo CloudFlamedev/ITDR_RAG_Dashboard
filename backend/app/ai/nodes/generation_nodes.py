@@ -130,18 +130,30 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
 
             # Parse JSON with json-repair for guaranteed structured object recovery
             from json_repair import repair_json
+            report_dict = None
             try:
-                report_dict = repair_json(raw_response, return_objects=True)
-                if not isinstance(report_dict, dict):
-                    raise ValueError("repair_json did not return dict")
+                parsed = repair_json(raw_response, return_objects=True)
+                if isinstance(parsed, dict):
+                    report_dict = parsed
+                elif isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                    report_dict = parsed[0]
             except Exception:
+                pass
+
+            if not report_dict:
                 first_brace = raw_response.find("{")
-                last_brace = raw_response.rfind("}")
-                if first_brace != -1 and last_brace != -1:
-                    cleaned = raw_response[first_brace : last_brace + 1]
-                    report_dict = json.loads(cleaned)
-                else:
-                    raise ValueError(f"No JSON object found in response: {raw_response[:100]}")
+                if first_brace != -1:
+                    try:
+                        parsed = repair_json(raw_response[first_brace:], return_objects=True)
+                        if isinstance(parsed, dict):
+                            report_dict = parsed
+                        elif isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                            report_dict = parsed[0]
+                    except Exception:
+                        pass
+
+            if not isinstance(report_dict, dict):
+                raise ValueError("Could not parse valid JSON dictionary from LLM response")
 
         except Exception as e:
             logger.warning(f"Grok LLM call failed or timed out ({e}); falling back to grounded synthesis.")
