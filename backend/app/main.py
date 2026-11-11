@@ -44,6 +44,15 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Langfuse credentials not configured; telemetry runs in fallback mode.")
 
+    # Pre-warm ATT&CK taxonomy cache in background thread/task to eliminate cold-start latency
+    try:
+        from app.db.session import SessionLocal
+        from app.services.retrieval_service import prewarm_taxonomy_cache
+        with SessionLocal() as db_session:
+            prewarm_taxonomy_cache(db_session)
+    except Exception as exc:
+        logger.warning(f"Startup taxonomy cache pre-warming skipped: {exc}")
+
     yield
 
     # Langfuse flush on graceful shutdown to prevent data loss

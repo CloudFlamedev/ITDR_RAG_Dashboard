@@ -75,7 +75,11 @@ export const ThreatModelingWorkspace = () => {
       setAnalysisResult(res);
     } catch (err) {
       console.error('Analysis error:', err);
-      setAnalysisError(err.response?.data?.detail || err.message || 'Threat modeling pipeline failed.');
+      let errMsg = err.response?.data?.detail || err.message || 'Threat modeling pipeline failed.';
+      if (err.message === 'Network Error' || !err.response) {
+        errMsg = 'Analysis timed out or backend cold-start encountered. Render free tier takes ~30s on cold start; please retry your request.';
+      }
+      setAnalysisError(errMsg);
     } finally {
       setAnalyzing(false);
     }

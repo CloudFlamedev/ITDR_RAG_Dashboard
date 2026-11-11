@@ -84,10 +84,10 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                             api_key=settings.effective_llm_key,
                             base_url=settings.effective_llm_base,
                             model=test_model,
-                            timeout=12,
+                            timeout=6,
                             temperature=0.1,
-                            max_tokens=650,
-                            max_retries=2,
+                            max_tokens=1100,
+                            max_retries=0,
                         )
                     else:
                         from langchain_xai import ChatXAI
@@ -95,9 +95,10 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                             xai_api_key=settings.effective_llm_key,
                             xai_api_base=settings.effective_llm_base,
                             model=test_model,
-                            timeout=12,
+                            timeout=6,
                             temperature=0.1,
-                            max_tokens=650,
+                            max_tokens=1100,
+                            max_retries=0,
                         )
 
                     lc_messages = [
@@ -111,16 +112,21 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                     break
                 except Exception as exc:
                     last_err = exc
-                    exc_msg = str(exc)
-                    if "model_not_found" in exc_msg or "decommissioned" in exc_msg or "does not exist" in exc_msg or "404" in exc_msg:
-                        logger.warning(f"Model {test_model} not found on {settings.effective_llm_base}, attempting fallback: {exc}")
+                    exc_msg = str(exc).lower()
+                    if any(term in exc_msg for term in ["model_not_found", "decommissioned", "does not exist", "404", "429", "rate_limit", "tokens"]):
+                        logger.warning(f"Model {test_model} unavailable or rate-limited ({exc}); falling back to next candidate model...")
                         continue
                     raise
 
             if response is None:
                 raise last_err or RuntimeError("No compatible model found on provider API")
 
-            raw_response = response.content
+            raw_response = (response.content or "").strip()
+            if not raw_response and hasattr(response, "additional_kwargs"):
+                raw_response = (response.additional_kwargs.get("reasoning_content") or "").strip()
+
+            if not raw_response:
+                raise ValueError("LLM returned empty response content")
 
             # Parse JSON with json-repair for guaranteed structured object recovery
             from json_repair import repair_json
@@ -133,9 +139,9 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                 last_brace = raw_response.rfind("}")
                 if first_brace != -1 and last_brace != -1:
                     cleaned = raw_response[first_brace : last_brace + 1]
+                    report_dict = json.loads(cleaned)
                 else:
-                    cleaned = raw_response.strip()
-                report_dict = json.loads(cleaned)
+                    raise ValueError(f"No JSON object found in response: {raw_response[:100]}")
 
         except Exception as e:
             logger.warning(f"Grok LLM call failed or timed out ({e}); falling back to grounded synthesis.")
@@ -182,6 +188,135 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
     }
 
 
+def _coerce_report_dict(raw_dict: Any) -> Dict[str, Any]:
+    """
+    Coerces LLM output dictionary into the exact shapes required by ThreatAnalysisReportSchema.
+    Handles common minor LLM formatting variations (e.g. lists instead of strings, missing required fields).
+    """
+    if not isinstance(raw_dict, dict):
+        return {}
+    d = dict(raw_dict)
+
+    # Coerce incident_overview: if list, join into string
+    if isinstance(d.get("incident_overview"), list):
+        d["incident_overview"] = "\n".join(str(x) for x in d["incident_overview"])
+    elif d.get("incident_overview") is None:
+        d["incident_overview"] = ""
+    else:
+        d["incident_overview"] = str(d["incident_overview"])
+
+    # Coerce executive_summary: if list, join into string
+    if isinstance(d.get("executive_summary"), list):
+        d["executive_summary"] = "\n".join(str(x) for x in d["executive_summary"])
+    elif d.get("executive_summary") is None:
+        d["executive_summary"] = ""
+    else:
+        d["executive_summary"] = str(d["executive_summary"])
+
+    # Coerce report_title
+    if not d.get("report_title"):
+        d["report_title"] = "ITDR Threat Analysis Brief"
+    else:
+        d["report_title"] = str(d["report_title"])
+
+    # Coerce severity
+    if not d.get("severity") or d.get("severity") not in ["Critical", "High", "Medium", "Low"]:
+        d["severity"] = "High"
+
+    # Coerce severity_rationale
+    if isinstance(d.get("severity_rationale"), list):
+        d["severity_rationale"] = " ".join(str(x) for x in d["severity_rationale"])
+    elif not d.get("severity_rationale"):
+        d["severity_rationale"] = f"Assigned {d['severity']} based on potential identity compromise and privilege escalation blast radius."
+    else:
+        d["severity_rationale"] = str(d["severity_rationale"])
+
+    # Coerce technique_candidates
+    candidates = d.get("technique_candidates")
+    clean_candidates = []
+    if isinstance(candidates, list):
+        for c in candidates:
+            if isinstance(c, dict) and c.get("technique_id"):
+                c_clean = dict(c)
+                c_clean["technique_id"] = str(c_clean["technique_id"]).strip()
+                c_clean["name"] = str(c_clean.get("name") or f"Technique {c_clean['technique_id']}")
+                if isinstance(c_clean.get("tactics"), str):
+                    c_clean["tactics"] = [c_clean["tactics"]] if c_clean["tactics"].strip() else []
+                elif not isinstance(c_clean.get("tactics"), list):
+                    c_clean["tactics"] = []
+                else:
+                    c_clean["tactics"] = [str(t) for t in c_clean["tactics"]]
+
+                try:
+                    c_clean["relevance_score"] = float(c_clean.get("relevance_score", 0.8))
+                except Exception:
+                    c_clean["relevance_score"] = 0.8
+
+                c_clean["is_exact_match"] = bool(c_clean.get("is_exact_match", False))
+                c_clean["rationale"] = str(c_clean.get("rationale") or c_clean.get("reason") or c_clean.get("description") or f"Identified in incident analysis for {c_clean['technique_id']}.")
+                clean_candidates.append(c_clean)
+    d["technique_candidates"] = clean_candidates
+
+    # Coerce defensive_techniques
+    defensive = d.get("defensive_techniques")
+    clean_defensive = []
+    if isinstance(defensive, list):
+        for def_tech in defensive:
+            if isinstance(def_tech, dict) and def_tech.get("d3fend_id"):
+                dt = dict(def_tech)
+                dt["d3fend_id"] = str(dt["d3fend_id"]).strip()
+                dt["name"] = str(dt.get("name") or f"Countermeasure {dt['d3fend_id']}")
+                dt["relationship_type"] = str(dt.get("relationship_type") or "mitigates")
+                dt["provenance"] = str(dt.get("provenance") or "MITRE D3FEND Ontology")
+                dt["rationale"] = str(dt.get("rationale") or dt.get("description") or "Countermeasure addressing identified threat behaviors.")
+                clean_defensive.append(dt)
+    d["defensive_techniques"] = clean_defensive
+
+    # Coerce coverage_assessment
+    coverage = d.get("coverage_assessment")
+    clean_coverage = []
+    if isinstance(coverage, list):
+        for cov in coverage:
+            if isinstance(cov, dict) and cov.get("technique_id"):
+                cv = dict(cov)
+                cv["technique_id"] = str(cv["technique_id"]).strip()
+                cv["status"] = str(cv.get("status") or "exposed")
+                try:
+                    cv["active_rules_count"] = int(cv.get("active_rules_count", 0))
+                except Exception:
+                    cv["active_rules_count"] = 0
+                if not isinstance(cv.get("mapped_tools"), list):
+                    cv["mapped_tools"] = [str(cv["mapped_tools"])] if cv.get("mapped_tools") else []
+                clean_coverage.append(cv)
+    d["coverage_assessment"] = clean_coverage
+
+    # Coerce recommended_actions
+    actions = d.get("recommended_actions")
+    clean_actions = []
+    if isinstance(actions, list):
+        for act in actions:
+            if isinstance(act, dict) and act.get("action"):
+                a = dict(act)
+                a["priority"] = str(a.get("priority") or "High")
+                a["category"] = str(a.get("category") or "SOC Playbook")
+                a["action"] = str(a["action"])
+                a["rationale"] = str(a.get("rationale") or "Remediates risk identified in threat analysis.")
+                clean_actions.append(a)
+    d["recommended_actions"] = clean_actions
+
+    # Coerce uncertainties
+    if isinstance(d.get("uncertainties"), list):
+        d["uncertainties"] = [str(u) for u in d["uncertainties"]]
+    else:
+        d["uncertainties"] = []
+
+    # Coerce extracted_indicators
+    if not isinstance(d.get("extracted_indicators"), dict):
+        d["extracted_indicators"] = {}
+
+    return d
+
+
 def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
     """
     Node 9: Validates the generated report against the Pydantic schema and
@@ -215,27 +350,75 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
     for d3f in state.get("d3fend_countermeasures", []):
         valid_source_ids.add(f"d3f-tech-{d3f['d3fend_id']}")
 
+    # Coerce and normalize schema before validation to absorb minor LLM formatting variances
+    report_dict = _coerce_report_dict(report_dict)
+
     # Validate against Pydantic schema
     try:
         validated_schema = ThreatAnalysisReportSchema(**report_dict)
         final_report = validated_schema.model_dump()
+
+        # Ensure defensive_techniques contains retrieved D3FEND countermeasures
+        if not final_report.get("defensive_techniques") and state.get("d3fend_countermeasures"):
+            defensive_items = []
+            for d in state["d3fend_countermeasures"]:
+                d_id = d["d3fend_id"]
+                defensive_items.append({
+                    "d3fend_id": d_id,
+                    "name": d["name"],
+                    "relationship_type": d.get("relationship_type", "mitigates"),
+                    "provenance": d.get("provenance", "MITRE D3FEND Ontology"),
+                    "rationale": f"Countermeasure mapped to identified threat behaviors ({d.get('matched_via', 'D3FEND mapping')}).",
+                    "official_url": d.get("url"),
+                })
+            final_report["defensive_techniques"] = defensive_items
+
+        # Ensure technique_candidates contains retrieved ATT&CK candidates
+        if len(final_report.get("technique_candidates", [])) < len(state.get("candidate_techniques", [])):
+            existing_cands = {c["technique_id"]: c for c in final_report.get("technique_candidates", [])}
+            augmented_cands = list(final_report.get("technique_candidates", []))
+            for c in state.get("candidate_techniques", []):
+                tid = c["technique_id"]
+                if tid not in existing_cands:
+                    augmented_cands.append({
+                        "technique_id": tid,
+                        "name": c["name"],
+                        "tactics": c.get("tactics", []),
+                        "relevance_score": c.get("similarity_score", 0.8),
+                        "is_exact_match": c.get("is_exact_match", False),
+                        "rationale": f"Retrieved candidate based on behavioral telemetry alignment ({c.get('description', '')[:150]}...).",
+                        "supporting_evidence_ids": [f"att-tech-{tid}"],
+                        "official_url": c.get("url"),
+                    })
+            final_report["technique_candidates"] = augmented_cands
 
         # Audit citations: filter out any fabricated citation IDs
         citations = []
         for cit in final_report.get("citations", []):
             citations.append(cit)
 
-        # If no citations were generated by LLM, populate from top candidate evidence
-        if not citations and state.get("candidate_techniques"):
-            for cand in state["candidate_techniques"][:3]:
-                citations.append({
-                    "source_id": f"att-tech-{cand['technique_id']}",
-                    "external_id": cand["technique_id"],
-                    "source_url": cand.get("url"),
-                    "excerpt": f"{cand['name']}: {cand['description'][:200]}...",
-                    "relevance_score": cand.get("similarity_score", 1.0),
-                    "citation_role": "Technique Evidence",
-                })
+        # If no citations were generated by LLM, populate from top candidate and D3FEND evidence
+        if not citations:
+            if state.get("candidate_techniques"):
+                for cand in state["candidate_techniques"][:3]:
+                    citations.append({
+                        "source_id": f"att-tech-{cand['technique_id']}",
+                        "external_id": cand["technique_id"],
+                        "source_url": cand.get("url"),
+                        "excerpt": f"{cand['name']}: {cand['description'][:200]}...",
+                        "relevance_score": cand.get("similarity_score", 1.0),
+                        "citation_role": "Technique Evidence",
+                    })
+            if final_report.get("defensive_techniques"):
+                for def_t in final_report["defensive_techniques"][:3]:
+                    citations.append({
+                        "source_id": f"d3f-tech-{def_t['d3fend_id']}",
+                        "external_id": def_t["d3fend_id"],
+                        "source_url": def_t.get("official_url"),
+                        "excerpt": f"D3FEND Countermeasure: {def_t['name']} - {def_t['rationale']}",
+                        "relevance_score": 1.0,
+                        "citation_role": "Countermeasure Evidence",
+                    })
             final_report["citations"] = citations
 
     except Exception as e:

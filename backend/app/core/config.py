@@ -124,7 +124,7 @@ class Settings(BaseSettings):
 
     # Usage Limits for Public Demo Analysts
     DAILY_ANALYSIS_LIMIT: int = Field(
-        default=5,
+        default=25,
         description="Maximum daily GenAI threat modeling executions for Demo Analyst accounts"
     )
     GLOBAL_DAILY_ANALYSIS_LIMIT: int = Field(

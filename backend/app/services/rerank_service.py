@@ -95,7 +95,7 @@ class RerankService:
         }
 
         self.last_api_succeeded = False
-        max_retries = 2
+        max_retries = 1
         for attempt in range(1, max_retries + 1):
             try:
                 response = requests.post(

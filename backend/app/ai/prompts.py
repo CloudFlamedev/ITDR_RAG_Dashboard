@@ -38,22 +38,26 @@ def build_user_prompt(
     extracted_indicators: Dict[str, Any],
 ) -> str:
     """Format prompt with retrieved context, candidates, and coverage state."""
-    # Compact candidates to stay within standard rate limits (e.g. Groq 8k TPM)
+    # Compact candidates to stay well within standard rate limits (e.g. Groq 8k TPM)
     compact_candidates = []
-    for c in candidate_techniques[:6]:
-        item = dict(c)
-        if "description" in item and isinstance(item["description"], str) and len(item["description"]) > 250:
-            item["description"] = item["description"][:250] + "..."
-        if "evidence_snippets" in item and isinstance(item["evidence_snippets"], list):
-            item["evidence_snippets"] = item["evidence_snippets"][:2]
-        compact_candidates.append(item)
+    for c in candidate_techniques[:5]:
+        desc = c.get("description", "")
+        compact_candidates.append({
+            "technique_id": c["technique_id"],
+            "name": c["name"],
+            "tactics": c.get("tactics", []),
+            "relevance_score": c.get("similarity_score", 0.8),
+            "description": (desc[:180] + "...") if len(desc) > 180 else desc,
+        })
 
     compact_d3fend = []
-    for d in d3fend_countermeasures[:6]:
-        d_item = dict(d)
-        if "definition" in d_item and isinstance(d_item["definition"], str) and len(d_item["definition"]) > 200:
-            d_item["definition"] = d_item["definition"][:200] + "..."
-        compact_d3fend.append(d_item)
+    for d in d3fend_countermeasures[:5]:
+        compact_d3fend.append({
+            "d3fend_id": d["d3fend_id"],
+            "name": d["name"],
+            "relationship_type": d.get("relationship_type", "mitigates"),
+            "matched_via": d.get("matched_via", "ATT&CK Mapping"),
+        })
 
     prompt_payload = {
         "user_advisory_text": advisory_text,

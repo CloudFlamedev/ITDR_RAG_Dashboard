@@ -55,6 +55,32 @@ class CandidateTechnique:
         }
 
 
+def prewarm_taxonomy_cache(db: Session) -> int:
+    """Pre-warm in-memory ATT&CK taxonomy cache at application startup or on demand."""
+    global _TECH_TAXONOMY_CACHE
+    with _tech_cache_lock:
+        if not _TECH_TAXONOMY_CACHE and db:
+            try:
+                techs = (
+                    db.query(AttackTechnique)
+                    .options(selectinload(AttackTechnique.tactics))
+                    .all()
+                )
+                for t in techs:
+                    _TECH_TAXONOMY_CACHE[t.technique_id] = {
+                        "id": t.id,
+                        "technique_id": t.technique_id,
+                        "name": t.name,
+                        "tactics": [tac.name for tac in t.tactics],
+                        "url": t.url,
+                        "description": t.description or "",
+                    }
+                logger.info(f"Pre-warmed ATT&CK taxonomy cache with {len(_TECH_TAXONOMY_CACHE)} techniques.")
+            except Exception as e:
+                logger.warning(f"Failed to pre-warm ATT&CK taxonomy cache: {e}")
+    return len(_TECH_TAXONOMY_CACHE)
+
+
 class RetrievalService:
     """
     Hybrid RAG retrieval engine combining:
@@ -73,7 +99,7 @@ class RetrievalService:
     ):
         self.db = db
         self.vector_store = vector_store or (VectorStoreService(db) if db else None)
-        self.rerank_service = rerank_service or RerankService()
+        self.rerank_service = rerank_service or RerankService(timeout=4)
 
     def extract_explicit_entities(self, text: str) -> Dict[str, List[str]]:
         """Safely extract explicit MITRE ATT&CK and D3FEND identifiers from user text."""
@@ -88,30 +114,13 @@ class RetrievalService:
     def _get_technique_dict(self, tech_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve technique from fast in-memory taxonomy cache, pre-warming on first access."""
         global _TECH_TAXONOMY_CACHE
-        with _tech_cache_lock:
-            if not _TECH_TAXONOMY_CACHE and self.db:
-                try:
-                    techs = (
-                        self.db.query(AttackTechnique)
-                        .options(selectinload(AttackTechnique.tactics))
-                        .all()
-                    )
-                    for t in techs:
-                        _TECH_TAXONOMY_CACHE[t.technique_id] = {
-                            "id": t.id,
-                            "technique_id": t.technique_id,
-                            "name": t.name,
-                            "tactics": [tac.name for tac in t.tactics],
-                            "url": t.url,
-                            "description": t.description or "",
-                        }
-                except Exception as e:
-                    logger.warning(f"Failed to pre-warm ATT&CK taxonomy cache: {e}")
+        if not _TECH_TAXONOMY_CACHE and self.db:
+            prewarm_taxonomy_cache(self.db)
 
-            entry = _TECH_TAXONOMY_CACHE.get(tech_id)
-            if not entry and "." in tech_id:
-                entry = _TECH_TAXONOMY_CACHE.get(tech_id.split(".")[0])
-            return entry
+        entry = _TECH_TAXONOMY_CACHE.get(tech_id)
+        if not entry and "." in tech_id:
+            entry = _TECH_TAXONOMY_CACHE.get(tech_id.split(".")[0])
+        return entry
 
     @observe(as_type="span", name="hybrid_retrieval_pipeline")
     def retrieve(
