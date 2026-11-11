@@ -2,6 +2,7 @@ import re
 import logging
 import threading
 from typing import List, Dict, Any, Optional
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload, joinedload
 from app.models.attack import AttackTechnique
 from app.models.d3fend import D3fendTechnique, AttackDefenceMapping
@@ -281,56 +282,115 @@ class RetrievalService:
         countermeasures = []
         seen_d3f_ids = set()
 
-        # A. Exact MITRE D3FEND mappings for candidate techniques (batched in 1 single query)
+        # A. Official & Inferred MITRE D3FEND mappings for candidate techniques
         all_att_ids = set()
         for att_id in candidate_technique_ids:
             all_att_ids.add(att_id)
             if "." in att_id:
                 all_att_ids.add(att_id.split(".")[0])
 
-        mappings = (
-            self.db.query(AttackDefenceMapping)
-            .options(joinedload(AttackDefenceMapping.d3fend_technique))
-            .filter(AttackDefenceMapping.attack_technique_external_id.in_(all_att_ids))
-            .all()
-        )
+        if all_att_ids:
+            mappings = (
+                self.db.query(AttackDefenceMapping)
+                .options(joinedload(AttackDefenceMapping.d3fend_technique))
+                .filter(AttackDefenceMapping.attack_technique_external_id.in_(all_att_ids))
+                .all()
+            )
 
-        for m in mappings:
-            d3f = m.d3fend_technique
-            if d3f and d3f.d3fend_id not in seen_d3f_ids:
-                seen_d3f_ids.add(d3f.d3fend_id)
-                countermeasures.append({
-                    "d3fend_id": d3f.d3fend_id,
-                    "name": d3f.name,
-                    "relationship_type": m.relationship_type,
-                    "provenance": m.mapping_source,
-                    "provenance_url": m.provenance_url,
-                    "definition": d3f.definition or "",
-                    "url": d3f.url,
-                    "matched_via": f"Official mapping to {m.attack_technique_external_id}",
-                })
+            for m in mappings:
+                d3f = m.d3fend_technique
+                if d3f and d3f.d3fend_id not in seen_d3f_ids:
+                    seen_d3f_ids.add(d3f.d3fend_id)
+                    countermeasures.append({
+                        "d3fend_id": d3f.d3fend_id,
+                        "name": d3f.name,
+                        "relationship_type": m.relationship_type,
+                        "provenance": m.mapping_source or "MITRE D3FEND Ontology",
+                        "provenance_url": m.provenance_url,
+                        "definition": d3f.definition or "",
+                        "url": d3f.url,
+                        "matched_via": f"Official mapping to {m.attack_technique_external_id}",
+                    })
 
-        # B. Semantic vector search over D3FEND documents
-        d3f_vector_results = self.vector_store.similarity_search(
-            query=query_text,
-            top_k=5,
-            source_kind="d3fend",
-            min_score=0.15,
-        )
+        # B. Direct lookup for explicit D3FEND IDs mentioned in narrative
+        if explicit_d3fend_ids:
+            explicit_records = (
+                self.db.query(D3fendTechnique)
+                .filter(D3fendTechnique.d3fend_id.in_(explicit_d3fend_ids))
+                .all()
+            )
+            for d3f in explicit_records:
+                if d3f.d3fend_id not in seen_d3f_ids:
+                    seen_d3f_ids.add(d3f.d3fend_id)
+                    countermeasures.append({
+                        "d3fend_id": d3f.d3fend_id,
+                        "name": d3f.name,
+                        "relationship_type": "explicit countermeasure indicator",
+                        "provenance": "MITRE D3FEND Ontology",
+                        "provenance_url": d3f.url,
+                        "definition": d3f.definition or "",
+                        "url": d3f.url,
+                        "matched_via": "Explicit D3FEND indicator in advisory",
+                    })
 
-        for doc, score in d3f_vector_results:
-            d3f_id = doc.external_id
-            if d3f_id not in seen_d3f_ids:
-                seen_d3f_ids.add(d3f_id)
-                countermeasures.append({
-                    "d3fend_id": d3f_id,
-                    "name": doc.title.split(": ")[-1] if ": " in doc.title else doc.title,
-                    "relationship_type": "recommended countermeasure",
-                    "provenance": "Semantic RAG match",
-                    "provenance_url": doc.url,
-                    "definition": doc.content[:250] + "...",
-                    "url": doc.url,
-                    "matched_via": f"Semantic similarity ({round(score, 3)})",
-                })
+        # C. Concept & Keyword matching for identity threat domains
+        if len(countermeasures) < 6:
+            lower_query = query_text.lower()
+            key_concepts = [
+                ("certificate", ["certificate", "ad cs", "esc1", "esc", "pki", "san"]),
+                ("authentication", ["authentication", "mfa", "logon", "login", "sso"]),
+                ("account", ["account", "active directory", "domain admin", "user account", "group"]),
+                ("credential", ["credential", "password", "hash", "ntlm", "kerberos", "ticket", "token"]),
+                ("session", ["session", "cookie", "token"]),
+            ]
+            active_terms = []
+            for term, triggers in key_concepts:
+                if any(trig in lower_query for trig in triggers):
+                    active_terms.append(term)
+
+            if active_terms:
+                or_clauses = [D3fendTechnique.name.ilike(f"%{t}%") for t in active_terms]
+                concept_matches = self.db.query(D3fendTechnique).filter(or_(*or_clauses)).limit(10).all()
+                for d3f in concept_matches:
+                    if d3f.d3fend_id not in seen_d3f_ids:
+                        seen_d3f_ids.add(d3f.d3fend_id)
+                        countermeasures.append({
+                            "d3fend_id": d3f.d3fend_id,
+                            "name": d3f.name,
+                            "relationship_type": "identity defensive countermeasure",
+                            "provenance": "MITRE D3FEND Ontology",
+                            "provenance_url": d3f.url,
+                            "definition": d3f.definition or "",
+                            "url": d3f.url,
+                            "matched_via": "Identity defense concept match",
+                        })
+                    if len(countermeasures) >= 6:
+                        break
+
+        # D. Semantic vector search over D3FEND documents
+        if len(countermeasures) < 8:
+            d3f_vector_results = self.vector_store.similarity_search(
+                query=query_text[:300],
+                top_k=5,
+                source_kind="d3fend",
+                min_score=0.01,
+            )
+
+            for doc, score in d3f_vector_results:
+                d3f_id = doc.external_id
+                if d3f_id not in seen_d3f_ids:
+                    seen_d3f_ids.add(d3f_id)
+                    countermeasures.append({
+                        "d3fend_id": d3f_id,
+                        "name": doc.title.split(": ")[-1] if ": " in doc.title else doc.title,
+                        "relationship_type": "recommended countermeasure",
+                        "provenance": "Semantic RAG match",
+                        "provenance_url": doc.url,
+                        "definition": doc.content[:250] + "...",
+                        "url": doc.url,
+                        "matched_via": f"Semantic similarity ({round(score, 3)})",
+                    })
+                if len(countermeasures) >= 8:
+                    break
 
         return countermeasures[:8]

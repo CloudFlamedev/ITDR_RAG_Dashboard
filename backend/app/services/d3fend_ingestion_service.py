@@ -127,7 +127,46 @@ class D3fendIngestionService:
 
         self.db.commit()
 
-        # 3. Batch Insert AttackDefenceMappings
+        # 3. Extract Digital Artifact Mappings (Ontology graph connecting defenses & attacks via artifacts)
+        d3f_artifacts = {}
+        att_artifacts = {}
+
+        for item in graph:
+            d3f_id = item.get("d3f:d3fend-id")
+            att_id = item.get("d3f:attack-id")
+
+            if d3f_id:
+                for k, v in item.items():
+                    if k.startswith("d3f:") and k not in ["d3f:d3fend-id", "d3f:definition", "d3f:kb-abstract", "d3f:kb-article", "d3f:created"]:
+                        rel = k.replace("d3f:", "")
+                        vals = v if isinstance(v, list) else [v]
+                        for val in vals:
+                            if isinstance(val, dict) and "@id" in val:
+                                art = val["@id"].replace("d3f:", "")
+                                d3f_artifacts.setdefault(art, []).append((d3f_id, rel))
+
+            if att_id:
+                for k, v in item.items():
+                    if k.startswith("d3f:") and k not in ["d3f:attack-id", "d3f:definition", "d3f:kb-abstract", "d3f:kb-article", "d3f:created"]:
+                        rel = k.replace("d3f:", "")
+                        vals = v if isinstance(v, list) else [v]
+                        for val in vals:
+                            if isinstance(val, dict) and "@id" in val:
+                                art = val["@id"].replace("d3f:", "")
+                                att_artifacts.setdefault(art, []).append((att_id, rel))
+
+        common_artifacts = set(d3f_artifacts.keys()) & set(att_artifacts.keys())
+        for art in common_artifacts:
+            for att_id, att_rel in att_artifacts[art]:
+                for d3f_id, d3f_rel in d3f_artifacts[art]:
+                    candidate_mappings.append((
+                        d3f_id,
+                        att_id,
+                        f"counters ({d3f_rel} {art})",
+                        f"https://d3fend.mitre.org/technique/{d3f_id}"
+                    ))
+
+        # 4. Batch Insert AttackDefenceMappings
         att_techniques_by_ext_id = {t.technique_id: t for t in self.db.query(AttackTechnique).all()}
         existing_map_keys = {
             (m.attack_technique_external_id, m.d3fend_external_id)
