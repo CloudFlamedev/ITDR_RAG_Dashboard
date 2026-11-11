@@ -1,5 +1,5 @@
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.db.session import get_db
@@ -9,6 +9,7 @@ from app.services.vector_store_service import VectorStoreService
 from app.core.config import get_settings
 from app.models.auth import User
 from app.api.deps import require_permission
+from app.core.telemetry import observe, propagate_attributes
 
 router = APIRouter(prefix="/api/rag", tags=["RAG & Vector Retrieval"])
 settings = get_settings()
@@ -36,8 +37,10 @@ _rag_search_rate_limiter: Dict[int, List[float]] = {}
 
 
 @router.post("/search", response_model=RagSearchResponse)
+@observe(name="itdr_rag_search")
 def search_rag_knowledge(
     req: RagSearchRequest,
+    request: Request = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("rag:search")),
 ):
@@ -59,13 +62,21 @@ def search_rag_knowledge(
             )
         timestamps.append(now_ts)
         _rag_search_rate_limiter[current_user.id] = timestamps
-    retriever = RetrievalService(db)
-    results = retriever.retrieve(
-        advisory_text=req.query,
-        max_candidates=req.top_k,
-        include_d3fend=req.include_d3fend,
-    )
-    return results
+
+    session_id = request.cookies.get(settings.SESSION_COOKIE_NAME) if request else None
+    with propagate_attributes(
+        user_id=str(current_user.id),
+        session_id=session_id,
+        tags=["itdr", "rag", "vector_search"],
+        metadata={"user_email": current_user.email, "top_k": req.top_k, "include_d3fend": req.include_d3fend},
+    ):
+        retriever = RetrievalService(db)
+        results = retriever.retrieve(
+            advisory_text=req.query,
+            max_candidates=req.top_k,
+            include_d3fend=req.include_d3fend,
+        )
+        return results
 
 
 @router.get("/health")

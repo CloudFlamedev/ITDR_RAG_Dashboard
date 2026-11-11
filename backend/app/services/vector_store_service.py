@@ -8,6 +8,7 @@ from app.models.rag import RagDocument
 from app.services.document_builder import RagDocumentDraft
 from app.services.embedding_service import EmbeddingService
 from app.core.config import get_settings
+from app.core.telemetry import observe, langfuse_client, mask_sensitive_data
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -107,6 +108,7 @@ class VectorStoreService:
         logger.info(f"RAG vector sync completed: {stats}")
         return stats
 
+    @observe(as_type="span", name="vector_knowledge_retrieval")
     def similarity_search(
         self,
         query: str,
@@ -119,14 +121,52 @@ class VectorStoreService:
         Execute semantic vector similarity search against rag_documents.
         Converts cosine distance to cosine similarity (1.0 - distance).
         """
+        masked_query = mask_sensitive_data(query)
         query_vec = self.embedding_service.embed_query(query)
-        return self.similarity_search_by_vector(
+        results = self.similarity_search_by_vector(
             query_vec=query_vec,
             top_k=top_k,
             source_kind=source_kind,
             document_type=document_type,
             min_score=min_score,
         )
+
+        # Format redacted snippet previews for observability
+        previews = []
+        for doc, score in results[:5]:
+            snippet = doc.content[:250] + "..." if len(doc.content) > 250 else doc.content
+            previews.append({
+                "chunk_id": doc.chunk_id,
+                "title": doc.title,
+                "external_id": doc.external_id,
+                "score": score,
+                "preview": mask_sensitive_data(snippet),
+            })
+
+        try:
+            langfuse_client.update_current_span(
+                input={
+                    "query": masked_query[:500],
+                    "top_k": top_k,
+                    "source_kind": source_kind,
+                    "document_type": document_type,
+                    "min_score": min_score,
+                },
+                output={
+                    "retrieved_count": len(results),
+                    "chunks": previews,
+                },
+                metadata={
+                    "storage_backend": "neon_pgvector" if self._has_pgvector else "numpy_fallback",
+                    "vector_distance_operator": "<=> cosine_distance" if self._has_pgvector else "in_memory_cosine",
+                    "embedding_model": self.embedding_service.model_name,
+                    "vector_dimension": len(query_vec) if query_vec else 0,
+                },
+            )
+        except Exception as e:
+            logger.debug(f"Langfuse vector retrieval span update skipped: {e}")
+
+        return results
 
     def similarity_search_by_vector(
         self,

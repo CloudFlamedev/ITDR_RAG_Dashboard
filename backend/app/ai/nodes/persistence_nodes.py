@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.ai.state import ThreatAnalysisState
 from app.models.threat_report import ThreatAnalysisReport, AnalysisCitation, AnalysisTraceStep
 from app.db.session import SessionLocal
+from app.core.telemetry import log_threat_score, get_current_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,27 @@ def persist_report_and_trace(state: ThreatAnalysisState) -> Dict[str, Any]:
 
         db.commit()
         logger.info(f"Report {report_id} and {len(all_steps)} trace steps persisted.")
+
+        # Log threat scores to Langfuse if trace context is active
+        trace_id = get_current_trace_id()
+        if trace_id:
+            sev = report_obj.severity or "High"
+            sev_rationale = report_obj.severity_rationale or ""
+            retrieval_conf = float(state.get("highest_retrieval_confidence", 0.0) or 0.0)
+            sev_weights = {"Critical": 0.95, "High": 0.85, "Medium": 0.65, "Low": 0.40}
+            conf_val = retrieval_conf if retrieval_conf > 0 else sev_weights.get(sev, 0.75)
+            log_threat_score(
+                name="threat_confidence",
+                value=round(conf_val, 2),
+                trace_id=trace_id,
+                comment=f"Automated ITDR severity assessment: {sev} - {sev_rationale[:200]}",
+            )
+            log_threat_score(
+                name="threat_severity",
+                value=sev,
+                trace_id=trace_id,
+                comment=f"Assigned severity level: {sev}",
+            )
 
     except Exception as e:
         db.rollback()

@@ -1,7 +1,7 @@
 import uuid
 import datetime
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
@@ -11,6 +11,14 @@ from app.models.threat_report import ThreatAnalysisReport, AnalysisCitation, Ana
 from app.models.auth import User
 from app.services.auth_service import AuthService
 from app.api.deps import require_permission, verify_csrf
+from app.core.telemetry import (
+    observe,
+    propagate_attributes,
+    CallbackHandler,
+    log_threat_score,
+    get_current_trace_id,
+    mask_sensitive_data,
+)
 
 logger = logging.getLogger(__name__) if False else None
 settings = get_settings()
@@ -87,8 +95,10 @@ def get_sample_threat_inputs(
 
 
 @router.post("/analyze")
+@observe(name="itdr_rag_query")
 def analyze_threat(
     req: ThreatAnalysisRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("threats:analyze")),
     _csrf: None = Depends(verify_csrf),
@@ -187,8 +197,32 @@ def analyze_threat(
         "error": None,
     }
 
+    # Extract request session and user identity for Langfuse tracing
+    session_id = request.cookies.get(settings.SESSION_COOKIE_NAME) or req.sample_id or report_id
+    user_id = str(current_user.id)
+    trace_tags = ["itdr", "threat_detection", "rag"]
+    trace_metadata = {
+        "user_email": current_user.email,
+        "user_role": current_user.role_names[0] if current_user.role_names else "Demo Analyst",
+        "itdr_scope": req.itdr_scope,
+        "view_mode": req.view_mode,
+        "client_restriction": req.client_restriction,
+        "sample_id": req.sample_id,
+        "report_id": report_id,
+    }
+
     try:
-        result = threat_analysis_app.invoke(initial_state)
+        with propagate_attributes(
+            user_id=user_id,
+            session_id=session_id,
+            tags=trace_tags,
+            metadata=trace_metadata,
+        ):
+            langfuse_cb = CallbackHandler()
+            result = threat_analysis_app.invoke(
+                initial_state,
+                config={"callbacks": [langfuse_cb]},
+            )
     except Exception as e:
         db.query(ThreatAnalysisReport).filter_by(report_id=report_id).update({
             "completion_status": "Failed",
@@ -196,6 +230,31 @@ def analyze_threat(
         })
         db.commit()
         raise HTTPException(status_code=500, detail=f"Threat analysis execution failed: {str(e)}")
+
+    # Severity & Threat Score Logging (Requirement 3.E)
+    structured_report = result.get("structured_report") or {}
+    severity = structured_report.get("severity", "High")
+    severity_rationale = structured_report.get("severity_rationale", "")
+    retrieval_conf = float(result.get("highest_retrieval_confidence", 0.0) or 0.0)
+
+    # Compute numeric confidence metric
+    severity_weight_map = {"Critical": 0.95, "High": 0.85, "Medium": 0.65, "Low": 0.40}
+    confidence_value = retrieval_conf if retrieval_conf > 0 else severity_weight_map.get(severity, 0.75)
+
+    trace_id = get_current_trace_id()
+    if trace_id:
+        log_threat_score(
+            trace_id=trace_id,
+            name="threat_confidence",
+            value=round(confidence_value, 2),
+            comment=f"Automated ITDR severity assessment: {severity} - {severity_rationale[:200]}",
+        )
+        log_threat_score(
+            trace_id=trace_id,
+            name="threat_severity",
+            value=severity,
+            comment=f"Assigned threat severity level: {severity}",
+        )
 
     return {
         "report_id": result.get("report_id", report_id),

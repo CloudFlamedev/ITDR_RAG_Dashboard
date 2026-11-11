@@ -12,7 +12,12 @@ from app.api.rag import router as rag_router
 from app.api.auth import router as auth_router
 from app.api.users import router as users_router
 
+from langfuse import get_client, observe
+
 settings = get_settings()
+
+# Initialize Langfuse client singleton
+langfuse = get_client()
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -25,7 +30,27 @@ logger = logging.getLogger("itdr-platform")
 async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION} in {settings.APP_ENV} mode")
     logger.info(f"Database target: {settings.DATABASE_URL.split('@')[-1] if '@' in settings.DATABASE_URL else 'configured'}")
+
+    # Langfuse telemetry startup check
+    if settings.has_langfuse_credentials:
+        try:
+            if langfuse.auth_check():
+                logger.info("Langfuse observability layer authenticated and ready.")
+            else:
+                logger.warning("Langfuse auth_check returned False; check configured keys.")
+        except Exception as e:
+            logger.warning(f"Langfuse startup auth check warning: {e}")
+    else:
+        logger.info("Langfuse credentials not configured; telemetry runs in fallback mode.")
+
     yield
+
+    # Langfuse flush on graceful shutdown to prevent data loss
+    try:
+        langfuse.flush()
+        logger.info("Langfuse telemetry events flushed successfully.")
+    except Exception as e:
+        logger.warning(f"Error flushing Langfuse client on shutdown: {e}")
 
 
 docs_url = None if settings.is_production else "/docs"

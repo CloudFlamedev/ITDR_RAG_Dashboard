@@ -8,6 +8,7 @@ from app.models.d3fend import D3fendTechnique, AttackDefenceMapping
 from app.models.rag import RagDocument
 from app.services.vector_store_service import VectorStoreService
 from app.services.rerank_service import RerankService
+from app.core.telemetry import observe, langfuse_client, mask_sensitive_data
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,7 @@ class RetrievalService:
                 entry = _TECH_TAXONOMY_CACHE.get(tech_id.split(".")[0])
             return entry
 
+    @observe(as_type="span", name="hybrid_retrieval_pipeline")
     def retrieve(
         self,
         advisory_text: str,
@@ -229,6 +231,30 @@ class RetrievalService:
         # 5. Check confidence / sufficiency
         highest_score = ranked_candidates[0].score if ranked_candidates else 0.0
         insufficient_evidence = (highest_score < min_similarity_threshold and not explicit_attack_ids)
+
+        try:
+            langfuse_client.update_current_span(
+                input={
+                    "advisory_text": mask_sensitive_data(advisory_text[:500]),
+                    "max_candidates": max_candidates,
+                    "include_d3fend": include_d3fend,
+                    "min_similarity_threshold": min_similarity_threshold,
+                },
+                output={
+                    "explicit_attack_indicators": explicit_attack_ids,
+                    "candidate_techniques_count": len(ranked_candidates),
+                    "d3fend_countermeasures_count": len(defensive_countermeasures),
+                    "highest_confidence": round(highest_score, 4),
+                    "insufficient_evidence": insufficient_evidence,
+                },
+                metadata={
+                    "rerank_applied": rerank_meta.get("rerank_performed", False),
+                    "rerank_model": rerank_meta.get("rerank_model"),
+                    "rerank_latency_ms": rerank_meta.get("duration_ms", 0.0),
+                }
+            )
+        except Exception as e:
+            logger.debug(f"Langfuse hybrid retrieval span update skipped: {e}")
 
         return {
             "query_summary": advisory_text[:150] + ("..." if len(advisory_text) > 150 else ""),

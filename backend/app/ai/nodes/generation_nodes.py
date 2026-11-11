@@ -8,6 +8,7 @@ from app.ai.state import ThreatAnalysisState
 from app.ai.prompts import SYSTEM_PROMPT, build_user_prompt
 from app.ai.output_schemas import ThreatAnalysisReportSchema
 from app.core.config import get_settings
+from app.core.telemetry import observe, langfuse_client, CallbackHandler, mask_sensitive_data
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -47,6 +48,7 @@ def build_grounded_prompt(state: ThreatAnalysisState) -> Dict[str, Any]:
     }
 
 
+@observe(as_type="generation", name="threat_response_generation")
 def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
     """
     Node 8: Executes structured report generation.
@@ -102,7 +104,7 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                         SystemMessage(content=messages[0]["content"]),
                         HumanMessage(content=messages[1]["content"]),
                     ]
-                    response = llm.invoke(lc_messages)
+                    response = llm.invoke(lc_messages, config={"callbacks": [CallbackHandler()]})
                     used_model = test_model
                     model_name = test_model
                     model_provider = f"Groq LLM ({test_model})" if settings.is_groq else f"xAI Grok ({test_model})"
@@ -158,6 +160,20 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
         },
         "error": None,
     }
+
+    try:
+        langfuse_client.update_current_generation(
+            input=[{"role": m.get("role", "user"), "content": mask_sensitive_data(m.get("content", "")[:500])} for m in messages],
+            output=mask_sensitive_data(raw_response or ""),
+            metadata={
+                "model_provider": model_provider,
+                "model_name": model_name,
+                "report_id": state.get("report_id"),
+                "duration_ms": round((time.perf_counter() - start) * 1000, 2),
+            },
+        )
+    except Exception as e:
+        logger.debug(f"Langfuse generation update skipped: {e}")
 
     return {
         "raw_llm_response": raw_response,
