@@ -12,12 +12,16 @@ from app.api.rag import router as rag_router
 from app.api.auth import router as auth_router
 from app.api.users import router as users_router
 
-from langfuse import get_client, observe
-
 settings = get_settings()
 
-# Initialize Langfuse client singleton
-langfuse = get_client()
+# Centralized Langfuse telemetry client and lifecycle
+from app.core.telemetry import (
+    langfuse,
+    langfuse_client,
+    check_telemetry_auth,
+    flush_telemetry,
+    observe,
+)
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -33,24 +37,18 @@ async def lifespan(app: FastAPI):
 
     # Langfuse telemetry startup check
     if settings.has_langfuse_credentials:
-        try:
-            if langfuse.auth_check():
-                logger.info("Langfuse observability layer authenticated and ready.")
-            else:
-                logger.warning("Langfuse auth_check returned False; check configured keys.")
-        except Exception as e:
-            logger.warning(f"Langfuse startup auth check warning: {e}")
+        if check_telemetry_auth():
+            logger.info(f"Langfuse observability layer authenticated and ready (host: {settings.effective_langfuse_host}).")
+        else:
+            logger.warning(f"Langfuse auth_check failed for host: {settings.effective_langfuse_host}; verify credentials and host region.")
     else:
         logger.info("Langfuse credentials not configured; telemetry runs in fallback mode.")
 
     yield
 
     # Langfuse flush on graceful shutdown to prevent data loss
-    try:
-        langfuse.flush()
-        logger.info("Langfuse telemetry events flushed successfully.")
-    except Exception as e:
-        logger.warning(f"Error flushing Langfuse client on shutdown: {e}")
+    flush_telemetry()
+    logger.info("Langfuse telemetry events flushed successfully.")
 
 
 docs_url = None if settings.is_production else "/docs"

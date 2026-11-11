@@ -150,7 +150,7 @@ class Settings(BaseSettings):
     # Langfuse Observability & Telemetry Configuration (v3+)
     LANGFUSE_PUBLIC_KEY: Optional[str] = Field(default=None, description="Langfuse Public Key")
     LANGFUSE_SECRET_KEY: Optional[str] = Field(default=None, description="Langfuse Secret Key")
-    LANGFUSE_BASE_URL: str = Field(default="https://cloud.langfuse.com", description="Langfuse Base URL")
+    LANGFUSE_BASE_URL: str = Field(default="https://us.cloud.langfuse.com", description="Langfuse Base URL")
     LANGFUSE_HOST: Optional[str] = Field(default=None, description="Langfuse Host URL alias")
     LANGFUSE_ENABLED: bool = Field(default=True, description="Enable Langfuse observability layer")
 
@@ -252,7 +252,11 @@ class Settings(BaseSettings):
 
     @property
     def effective_langfuse_host(self) -> str:
-        return self.LANGFUSE_HOST or self.LANGFUSE_BASE_URL or "https://cloud.langfuse.com"
+        host = self.LANGFUSE_HOST or self.LANGFUSE_BASE_URL or "https://us.cloud.langfuse.com"
+        host_str = str(host).strip().rstrip("/")
+        if not host_str.startswith("http://") and not host_str.startswith("https://"):
+            host_str = f"https://{host_str}"
+        return host_str
 
     @property
     def has_langfuse_credentials(self) -> bool:

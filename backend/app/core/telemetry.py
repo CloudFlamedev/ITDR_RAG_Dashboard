@@ -7,16 +7,15 @@ from app.core.config import get_settings
 logger = logging.getLogger("itdr-telemetry")
 settings = get_settings()
 
-# Sync environment variables for Langfuse SDK
+# Sync environment variables for Langfuse SDK before client initialization
 import os
-if settings.LANGFUSE_PUBLIC_KEY and "LANGFUSE_PUBLIC_KEY" not in os.environ:
+if settings.LANGFUSE_PUBLIC_KEY:
     os.environ["LANGFUSE_PUBLIC_KEY"] = settings.LANGFUSE_PUBLIC_KEY
-if settings.LANGFUSE_SECRET_KEY and "LANGFUSE_SECRET_KEY" not in os.environ:
+if settings.LANGFUSE_SECRET_KEY:
     os.environ["LANGFUSE_SECRET_KEY"] = settings.LANGFUSE_SECRET_KEY
-if settings.effective_langfuse_host and "LANGFUSE_BASE_URL" not in os.environ:
-    os.environ["LANGFUSE_BASE_URL"] = settings.effective_langfuse_host
-if settings.effective_langfuse_host and "LANGFUSE_HOST" not in os.environ:
-    os.environ["LANGFUSE_HOST"] = settings.effective_langfuse_host
+host = settings.effective_langfuse_host
+os.environ["LANGFUSE_BASE_URL"] = host
+os.environ["LANGFUSE_HOST"] = host
 
 # Import Langfuse components
 from langfuse import get_client, observe, propagate_attributes
@@ -24,6 +23,7 @@ from langfuse.langchain import CallbackHandler
 
 # Initialize singleton client
 langfuse_client = get_client()
+langfuse = langfuse_client
 
 # ==============================================================================
 # Security & Privacy Guardrails: Data Masking & Hash Redaction
@@ -79,9 +79,13 @@ def check_telemetry_auth() -> bool:
         return False
     try:
         is_ok = bool(langfuse_client.auth_check())
+        if is_ok:
+            logger.info(f"Langfuse client authenticated successfully against {settings.effective_langfuse_host}.")
+        else:
+            logger.warning(f"Langfuse auth_check returned False for host: {settings.effective_langfuse_host}.")
         return is_ok
     except Exception as e:
-        logger.warning(f"Langfuse auth check failed: {e}")
+        logger.warning(f"Langfuse auth check failed for {settings.effective_langfuse_host}: {e}")
         return False
 
 

@@ -18,6 +18,7 @@ from app.core.telemetry import (
     log_threat_score,
     get_current_trace_id,
     mask_sensitive_data,
+    flush_telemetry,
 )
 
 logger = logging.getLogger(__name__) if False else None
@@ -229,6 +230,7 @@ def analyze_threat(
             "executive_summary": f"Analysis failed: {str(e)}",
         })
         db.commit()
+        flush_telemetry()
         raise HTTPException(status_code=500, detail=f"Threat analysis execution failed: {str(e)}")
 
     # Severity & Threat Score Logging (Requirement 3.E)
@@ -255,6 +257,9 @@ def analyze_threat(
             value=severity,
             comment=f"Assigned threat severity level: {severity}",
         )
+
+    # Immediately flush telemetry to avoid event loss in background workers
+    flush_telemetry()
 
     return {
         "report_id": result.get("report_id", report_id),

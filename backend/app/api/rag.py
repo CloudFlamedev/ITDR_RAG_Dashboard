@@ -9,7 +9,7 @@ from app.services.vector_store_service import VectorStoreService
 from app.core.config import get_settings
 from app.models.auth import User
 from app.api.deps import require_permission
-from app.core.telemetry import observe, propagate_attributes
+from app.core.telemetry import observe, propagate_attributes, flush_telemetry
 
 router = APIRouter(prefix="/api/rag", tags=["RAG & Vector Retrieval"])
 settings = get_settings()
@@ -76,6 +76,7 @@ def search_rag_knowledge(
             max_candidates=req.top_k,
             include_d3fend=req.include_d3fend,
         )
+        flush_telemetry()
         return results
 
 
