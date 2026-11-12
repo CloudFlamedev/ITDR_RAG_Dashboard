@@ -20,13 +20,25 @@ _kb_stats_cache: Dict[str, Any] = {"data": None, "cached_at": 0.0}
 _KB_CACHE_TTL = 60.0
 
 
-@router.get("/health")
+@router.api_route("/health", methods=["GET", "HEAD"])
 def get_liveness() -> Dict[str, Any]:
-    """Lightweight public liveness check for orchestrators and container health probes."""
+    """
+    Lightweight public liveness and keep-alive probe for orchestrators, cron-job monitors, and container health probes.
+    Supports both GET and HEAD methods. Warms database connection pool on each invocation.
+    """
+    db_status = "warm"
+    try:
+        from app.db.session import engine
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1;"))
+    except Exception as exc:
+        db_status = "standby"
+
     return {
         "status": "healthy",
         "service": "itdr-platform-api",
         "version": settings.APP_VERSION,
+        "database": db_status,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
 

@@ -1,0 +1,28 @@
+name: ITDR Platform Keep-Alive (Prevent Cold Starts)
+
+on:
+  schedule:
+    # Run every 10 minutes (Render sleeps after 15 minutes of inactivity)
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    name: Ping Backend & Neon Database
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping Render Backend Health Probe
+        run: |
+          echo "Sending keep-alive ping to Render backend..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 45 https://itdr-rag-dashboard.onrender.com/health)
+          echo "Render Backend Health Status: $STATUS"
+          if [ "$STATUS" -ne 200 ]; then
+            echo "Warning: Health probe returned $STATUS, attempting fallback to root..."
+            curl -s -f -m 30 https://itdr-rag-dashboard.onrender.com/ || true
+          fi
+
+      - name: Ping Vercel Frontend Proxy
+        run: |
+          echo "Sending keep-alive ping to Vercel frontend proxy..."
+          curl -s -o /dev/null -w "Vercel Proxy Status: %{http_code}\n" -m 30 https://itdr-rag-dashboard.vercel.app/health || true

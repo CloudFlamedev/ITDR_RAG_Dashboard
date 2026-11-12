@@ -82,7 +82,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
     allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "X-Requested-With", "Accept"],
     expose_headers=["Retry-After"],
 )
@@ -98,7 +98,7 @@ app.include_router(threats_router)
 app.include_router(rag_router)
 
 
-@app.get("/", tags=["Root"])
+@app.api_route("/", methods=["GET", "HEAD"], tags=["Root"])
 def get_root():
     """Root endpoint welcoming visitors and providing API discovery links."""
     return {

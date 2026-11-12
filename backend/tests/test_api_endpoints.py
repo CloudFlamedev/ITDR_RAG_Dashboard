@@ -12,6 +12,13 @@ def test_health_endpoints(client, admin_client):
     assert r.status_code == 200
     assert r.json()["status"] == "healthy"
 
+    # HEAD method supported for uptime monitors and cron-job probes
+    head_r = client.head("/health")
+    assert head_r.status_code == 200
+
+    root_head = client.head("/")
+    assert root_head.status_code == 200
+
     # Protected system telemetry requires authorization
     unauth_r = client.get("/api/system/status")
     assert unauth_r.status_code == 401
