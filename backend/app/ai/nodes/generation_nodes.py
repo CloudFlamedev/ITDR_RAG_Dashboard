@@ -26,21 +26,23 @@ _taxonomy_lock = threading.Lock()
 def _get_authoritative_taxonomy_sets() -> Tuple[Set[str], Set[str]]:
     """Retrieves and caches authoritative ATT&CK and D3FEND technique IDs from database records."""
     global _authoritative_attack_ids, _authoritative_d3fend_ids
-    if _authoritative_attack_ids is None or _authoritative_d3fend_ids is None:
+    if not _authoritative_attack_ids or not _authoritative_d3fend_ids:
         with _taxonomy_lock:
-            if _authoritative_attack_ids is None or _authoritative_d3fend_ids is None:
+            if not _authoritative_attack_ids or not _authoritative_d3fend_ids:
                 db: Session = SessionLocal()
                 try:
                     att_ids = {r[0] for r in db.query(AttackTechnique.technique_id).all()}
                     d3f_ids = {r[0] for r in db.query(D3fendTechnique.d3fend_id).all()}
-                    _authoritative_attack_ids = att_ids
-                    _authoritative_d3fend_ids = d3f_ids
+                    if att_ids:
+                        _authoritative_attack_ids = att_ids
+                    if d3f_ids:
+                        _authoritative_d3fend_ids = d3f_ids
                 except Exception as e:
                     logger.warning(f"Failed to load authoritative taxonomy from DB: {e}")
-                    return set(), set()
+                    return _authoritative_attack_ids or set(), _authoritative_d3fend_ids or set()
                 finally:
                     db.close()
-    return _authoritative_attack_ids, _authoritative_d3fend_ids
+    return _authoritative_attack_ids or set(), _authoritative_d3fend_ids or set()
 
 
 def build_grounded_prompt(state: ThreatAnalysisState) -> Dict[str, Any]:
