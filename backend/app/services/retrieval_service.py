@@ -39,7 +39,7 @@ class CandidateTechnique:
         self.name = name
         self.vector_score = vector_score if vector_score is not None else score
         self.rerank_score = rerank_score
-        self.score = score
+        self.score = self.vector_score  # score is strictly alias for vector_score, never rerank_score
         self.is_exact_match = is_exact_match
         self.tactics = tactics
         self.url = url
@@ -50,7 +50,7 @@ class CandidateTechnique:
         return {
             "technique_id": self.technique_id,
             "name": self.name,
-            "similarity_score": round(self.score, 4),
+            "similarity_score": round(self.vector_score, 4),
             "vector_score": round(self.vector_score, 4),
             "rerank_score": round(self.rerank_score, 4) if self.rerank_score is not None else None,
             "is_exact_match": self.is_exact_match,
@@ -246,10 +246,14 @@ class RetrievalService:
             )
 
         # 5. Check confidence / sufficiency & preserve separate score types
-        highest_score = ranked_candidates[0].score if ranked_candidates else 0.0
         highest_vector_score = max((c.vector_score for c in raw_candidates), default=0.0)
         rerank_scores = [c.rerank_score for c in ranked_candidates if c.rerank_score is not None]
-        highest_rerank_score = max(rerank_scores, default=None)
+        highest_rerank_score = max(rerank_scores, default=None) if (rerank_meta.get("rerank_performed") and rerank_scores) else None
+
+        if rerank_meta.get("rerank_performed") and highest_rerank_score is not None:
+            highest_confidence = highest_rerank_score
+        else:
+            highest_confidence = highest_vector_score
 
         # Calibrated vector similarity score used for cosine-based evidence threshold
         # (CRITICAL: Never compare Jina cross-encoder relevance scores against cosine similarity threshold)
@@ -295,7 +299,7 @@ class RetrievalService:
             "candidates": [c.to_dict() for c in ranked_candidates],
             "defensive_countermeasures": defensive_countermeasures,
             "insufficient_evidence": insufficient_evidence,
-            "highest_confidence": round(highest_score, 4),
+            "highest_confidence": round(highest_confidence, 4),
             "highest_vector_similarity": round(highest_vector_score, 4),
             "highest_rerank_score": round(highest_rerank_score, 4) if highest_rerank_score is not None else None,
             "has_explicit_attack_id": bool(explicit_attack_ids),

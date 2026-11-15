@@ -216,23 +216,15 @@ class RerankService:
 
                     if is_exact:
                         # Keep exact indicators locked at peak confidence
-                        final_score = 1.0
                         r_score = 1.0
                     else:
-                        final_score = round(float(rerank_score), 4)
-                        r_score = final_score
+                        r_score = round(float(rerank_score), 4)
 
+                    # Update rerank_score independently (keep vector_score and rerank_score strictly independent)
                     if hasattr(c, "rerank_score"):
                         c.rerank_score = r_score
                     elif isinstance(c, dict):
                         c["rerank_score"] = r_score
-
-                    if hasattr(c, "score"):
-                        c.score = final_score
-                    elif "similarity_score" in c:
-                        c["similarity_score"] = final_score
-                    elif "score" in c:
-                        c["score"] = final_score
             else:
                 logger.info("Reranker did not run via API; keeping original candidate similarity scores.")
 
@@ -240,11 +232,20 @@ class RerankService:
             error_msg = str(exc)
             logger.warning(f"Error during candidate reranking: {exc}")
 
-        # Re-sort candidates: exact matches first, then descending by updated score
+        # Re-sort candidates: exact matches first, then descending by rerank_score if performed, else vector_score
         def _sort_key(item):
             is_exact = getattr(item, "is_exact_match", False) if hasattr(item, "is_exact_match") else item.get("is_exact_match", False)
-            score = getattr(item, "score", 0.0) if hasattr(item, "score") else item.get("similarity_score", item.get("score", 0.0))
-            return (1 if is_exact else 0, score)
+            if performed:
+                r_score = getattr(item, "rerank_score", None) if hasattr(item, "rerank_score") else item.get("rerank_score")
+                score_val = r_score if r_score is not None else 0.0
+            else:
+                v_score = getattr(item, "vector_score", None) if hasattr(item, "vector_score") else item.get("vector_score")
+                if v_score is None:
+                    v_score = getattr(item, "similarity_score", None) if hasattr(item, "similarity_score") else item.get("similarity_score")
+                if v_score is None:
+                    v_score = getattr(item, "score", 0.0) if hasattr(item, "score") else item.get("score", 0.0)
+                score_val = v_score if v_score is not None else 0.0
+            return (1 if is_exact else 0, score_val)
 
         reranked = sorted(candidates, key=_sort_key, reverse=True)[:target_top_n]
         duration_ms = round((time.perf_counter() - start) * 1000, 2)

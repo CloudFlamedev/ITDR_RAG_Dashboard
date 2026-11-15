@@ -1,5 +1,6 @@
 # Evaluation and Monitoring Layer Dependencies
 # These dependencies are strictly isolated from normal production FastAPI runtime.
-ragas==0.2.14
+ragas==0.4.4
 datasets>=2.16.0
 pandas>=2.0.0
+openai>=1.0.0

@@ -189,14 +189,22 @@ def analyze_threat(
         "d3fend_countermeasures": [],
         "coverage_records": [],
         "highest_retrieval_confidence": 0.0,
+        "highest_vector_similarity": 0.0,
+        "highest_rerank_score": None,
+        "rerank_applied": False,
         "insufficient_evidence": False,
         "prompt_messages": [],
         "raw_llm_response": None,
         "structured_report": None,
         "citations": [],
+        "evaluation_contexts": [],
+        "unsupported_attack_ids": [],
+        "unsupported_d3fend_ids": [],
+        "invalid_citations_count": 0,
         "trace_steps": [],
         "status": "INITIALIZING",
         "error": None,
+        "evaluation_mode": False,
     }
 
     # Extract request session and user identity for Langfuse tracing
@@ -274,6 +282,7 @@ def analyze_threat(
                 "invalid_citations_count": invalid_cits,
                 "highest_vector_similarity": highest_vec,
                 "highest_rerank_score": highest_rerank,
+                "rerank_applied": bool(result.get("rerank_applied", False)),
                 "insufficient_evidence": is_insufficient,
                 "has_explicit_attack_id": bool(result.get("extracted_indicators", {}).get("attack_ids")),
                 "is_fallback_generation": bool(result.get("is_fallback_generation", False)),
@@ -290,6 +299,12 @@ def analyze_threat(
         "citations": result.get("citations", []),
         "trace_steps": result.get("trace_steps", []),
         "execution_duration_ms": sum(s.get("duration_ms", 0.0) for s in result.get("trace_steps", [])),
+        "highest_vector_similarity": float(result.get("highest_vector_similarity", 0.0) or 0.0),
+        "highest_rerank_score": result.get("highest_rerank_score"),
+        "rerank_applied": bool(result.get("rerank_applied", False)),
+        "unsupported_attack_ids": result.get("unsupported_attack_ids", []),
+        "unsupported_d3fend_ids": result.get("unsupported_d3fend_ids", []),
+        "invalid_citations_count": int(result.get("invalid_citations_count", 0) or 0),
     }
 
 

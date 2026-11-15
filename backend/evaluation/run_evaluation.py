@@ -25,7 +25,7 @@ from evaluation.retrieval_metrics import (
     evaluate_case_retrieval,
     aggregate_retrieval_metrics,
 )
-from evaluation.ragas_evaluator import RagasEvaluator
+from evaluation.ragas_evaluator import RagasEvaluator, format_report_for_evaluation
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("itdr-evaluation-runner")
@@ -367,13 +367,11 @@ def run_evaluation(
         model_providers_seen.add(model_prov)
         is_fallback = bool(result.get("is_fallback_generation", False))
 
-        # Format generated answer text for RAGAS evaluation
-        response_text = (
-            structured_rep.get("executive_summary")
-            or structured_rep.get("report_title")
-            or result.get("raw_llm_response")
-            or "No generated response."
-        )
+        # Format complete structured report for RAGAS evaluation (evaluating complete report, excluding metadata)
+        if isinstance(structured_rep, dict) and structured_rep:
+            response_text = format_report_for_evaluation(structured_rep)
+        else:
+            response_text = result.get("raw_llm_response") or "No generated response."
 
         record = {
             "sample_id": s_id,
@@ -456,7 +454,7 @@ def run_evaluation(
             "total_cases_evaluated": len(cases),
             "generation_model": settings.effective_llm_model,
             "generation_provider": ", ".join(sorted(list(model_providers_seen))),
-            "evaluator_model": os.environ.get("EVALUATOR_LLM_MODEL", "llama-3.3-70b-versatile"),
+            "evaluator_model": ragas_evaluator.model_name if not skip_ragas else "SKIPPED",
             "embedding_model": "BAAI/bge-m3 (384d)",
             "reranker_model": settings.effective_rerank_model,
         },
@@ -477,19 +475,45 @@ def run_evaluation(
     )
     report_data["regression_monitoring"] = regression_check
 
-    # If requested or if no baseline exists, save baseline
-    if generate_baseline or not base_file.exists():
-        logger.info(f"Saving current evaluation results as approved baseline to {base_file}...")
-        baseline_payload = {
-            "baseline_generated_at": now_iso,
-            "dataset_version": DATASET_VERSION,
-            "aggregate_metrics": {
-                "retrieval": agg_retrieval,
-                "ragas": ragas_result.get("aggregate_scores", {}),
-            },
-        }
-        with open(base_file, "w", encoding="utf-8") as f:
-            json.dump(baseline_payload, f, indent=2)
+    # Baseline generation guardrails: Require explicit generate_baseline flag, complete dataset, and non-null RAGAS scores
+    if generate_baseline:
+        ragas_scores = ragas_result.get("aggregate_scores", {})
+        null_metrics = [
+            m for m in [
+                "mean_context_precision",
+                "mean_context_recall",
+                "mean_faithfulness",
+                "mean_answer_relevancy",
+                "mean_factual_correctness",
+            ]
+            if ragas_scores.get(m) is None
+        ]
+        if limit or sample_ids:
+            logger.error(
+                f"Cannot generate approved baseline on partial dataset run ({len(cases)} cases). "
+                "Run the complete golden dataset to generate an approved baseline."
+            )
+            print("ERROR: Cannot save baseline on partial dataset run.")
+        elif null_metrics:
+            logger.error(
+                f"Cannot generate approved baseline: RAGAS metrics contain null values: {null_metrics}. "
+                "Ensure evaluator LLM and embeddings are configured and all metrics succeed."
+            )
+            print(f"ERROR: Cannot save baseline with null RAGAS metrics: {null_metrics}")
+        else:
+            logger.info(f"Saving current complete evaluation results as approved baseline to {base_file}...")
+            baseline_payload = {
+                "baseline_generated_at": now_iso,
+                "dataset_version": DATASET_VERSION,
+                "dataset_samples_count": len(cases),
+                "aggregate_metrics": {
+                    "retrieval": agg_retrieval,
+                    "ragas": ragas_scores,
+                },
+            }
+            with open(base_file, "w", encoding="utf-8") as f:
+                json.dump(baseline_payload, f, indent=2)
+            print(f"Approved baseline successfully generated and saved to {base_file}")
 
     # 6. Export Results
     out_dir = output_dir or (Path(__file__).parent / "results")
