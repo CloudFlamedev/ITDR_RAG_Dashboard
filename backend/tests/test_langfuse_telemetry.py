@@ -99,8 +99,12 @@ def test_rag_search_tracing_endpoint(analyst_client):
     assert data["candidate_count"] >= 0
 
 
-def test_threat_analysis_trace_and_scoring(analyst_client):
+def test_threat_analysis_trace_and_scoring(analyst_client, monkeypatch):
     """Verify /api/threats/analyze executes end-to-end within @observe root trace with Langfuse scores."""
+    from app.api import threats as threats_api
+    monkeypatch.setattr(threats_api.settings, "DAILY_ANALYSIS_LIMIT", 1000)
+    monkeypatch.setattr(threats_api.settings, "GLOBAL_DAILY_ANALYSIS_LIMIT", 10000)
+
     analyze_res = analyst_client.post(
         "/api/threats/analyze",
         json={

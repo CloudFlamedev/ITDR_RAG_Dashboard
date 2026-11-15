@@ -542,8 +542,11 @@ def test_usage_limits_advisory_length(db):
     assert "exceeds maximum allowed limit" in resp.json()["detail"].lower()
 
 
-def test_daily_analysis_quota_enforcement(db):
+def test_daily_analysis_quota_enforcement(db, monkeypatch):
     """Test that non-admins cannot exceed DAILY_ANALYSIS_LIMIT per 24 hours (HTTP 429)."""
+    from app.api import threats as threats_api
+    monkeypatch.setattr(threats_api.settings, "GLOBAL_DAILY_ANALYSIS_LIMIT", 100000)
+
     auth_svc = AuthService(db)
     uid = uuid.uuid4().hex[:6]
     u = auth_svc.register_public_user(f"Limit User {uid}", f"limit_{uid}@demo.local", "Password123!")

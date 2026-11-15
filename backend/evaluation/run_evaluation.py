@@ -122,15 +122,33 @@ def compare_against_baseline(
         return {
             "has_baseline": False,
             "status": "NOT_BASELINED",
-            "passed": True,
+            "passed": False,
             "regressions": [],
             "message": f"No approved baseline found at {baseline_path}. Run with --generate-baseline after review.",
         }
 
-    with open(baseline_path, "r", encoding="utf-8") as f:
-        baseline = json.load(f)
+    try:
+        with open(baseline_path, "r", encoding="utf-8") as f:
+            baseline = json.load(f)
+    except Exception as exc:
+        logger.error(f"Failed to read baseline file at {baseline_path}: {exc}")
+        return {
+            "has_baseline": True,
+            "status": "EVALUATION_ERROR",
+            "passed": False,
+            "regressions": [],
+            "message": f"Failed to load baseline from {baseline_path}: {exc}",
+        }
 
     baseline_metrics = baseline.get("aggregate_metrics", {})
+    if not baseline_metrics:
+        return {
+            "has_baseline": True,
+            "status": "EVALUATION_ERROR",
+            "passed": False,
+            "regressions": [],
+            "message": f"Baseline file at {baseline_path} missing aggregate_metrics.",
+        }
     regressions = []
 
     # Metrics to track for regression
@@ -200,6 +218,8 @@ def export_results(
             "sample_id",
             "case_type",
             "has_explicit_attack_id",
+            "has_empty_context",
+            "retrieval_context_status",
             "expected_attack_ids",
             "retrieved_attack_ids",
             "attack_precision_at_k",
@@ -227,6 +247,8 @@ def export_results(
                 c["sample_id"],
                 c["case_type"],
                 c["has_explicit_attack_id"],
+                c.get("has_empty_context", False),
+                c.get("retrieval_context_status", "RETRIEVED"),
                 ";".join(c["expected_attack_ids"]),
                 ";".join(c["retrieved_attack_ids"]),
                 c["attack_precision_at_k"],
@@ -289,23 +311,34 @@ def print_summary_table(report: Dict[str, Any], regression_res: Dict[str, Any]):
     print("2. RAGAS AGENTIC RAG METRICS")
     print("-" * 80)
     def _fmt(v): return f"{v:.4f}" if v is not None else "N/A"
-    print(f"Context Precision:     {_fmt(ragas_res.get('mean_context_precision'))}")
-    print(f"Context Recall:        {_fmt(ragas_res.get('mean_context_recall'))}")
-    print(f"Faithfulness:          {_fmt(ragas_res.get('mean_faithfulness'))}")
-    print(f"Answer Relevancy:      {_fmt(ragas_res.get('mean_answer_relevancy'))}")
-    print(f"Factual Correctness:   {_fmt(ragas_res.get('mean_factual_correctness'))}")
+    print(f"Context Precision (All):           {_fmt(ragas_res.get('mean_context_precision'))}")
+    print(f"Context Recall (All):              {_fmt(ragas_res.get('mean_context_recall'))}")
+    print(f"Calculated Context Precision:      {_fmt(ragas_res.get('mean_calculated_context_precision'))} (excluding assigned empty failures)")
+    print(f"Calculated Context Recall:         {_fmt(ragas_res.get('mean_calculated_context_recall'))} (excluding assigned empty failures)")
+    print(f"Faithfulness:                      {_fmt(ragas_res.get('mean_faithfulness'))} (fallback generations excluded)")
+    print(f"Answer Relevancy:                  {_fmt(ragas_res.get('mean_answer_relevancy'))} (fallback generations excluded)")
+    print(f"Factual Correctness:               {_fmt(ragas_res.get('mean_factual_correctness'))} (fallback generations excluded)")
+    print(f"Empty Retrieval Context Count:     {ragas_res.get('empty_context_count', 0)}")
+    print(f"Retrieved Context Count:           {ragas_res.get('retrieved_context_count', 0)}")
+    print(f"LLM Generation Count:              {ragas_res.get('llm_generation_count', 0)}")
+    print(f"Fallback Generation Count:         {ragas_res.get('fallback_generation_count', 0)}")
     print("-" * 80)
 
     print("3. REGRESSION MONITORING")
     print("-" * 80)
-    if not regression_res.get("has_baseline"):
-        print(f"Status: NOT BASELINED ({regression_res.get('message')})")
-    elif regression_res.get("passed"):
-        print(f"Status: PASS (No regression detected against baseline, tolerance={regression_res.get('tolerance_used')*100:.0f}%)")
-    else:
-        print(f"Status: FAILED (Regressions detected exceeding {regression_res.get('tolerance_used')*100:.0f}% tolerance!):")
+    status = regression_res.get("status", "NOT_BASELINED")
+    if status == "PASSED":
+        print(f"Status: PASSED (No regression detected against baseline, tolerance={regression_res.get('tolerance_used', 0.1)*100:.0f}%)")
+    elif status == "FAILED":
+        print(f"Status: FAILED (Regressions detected exceeding {regression_res.get('tolerance_used', 0.1)*100:.0f}% tolerance!):")
         for reg in regression_res.get("regressions", []):
             print(f"  - {reg['metric']}: dropped {reg['drop_percent']}% (Baseline: {reg['baseline_score']}, Current: {reg['current_score']}, Floor: {reg['allowed_floor']})")
+    elif status == "NOT_BASELINED":
+        print(f"Status: NOT_BASELINED ({regression_res.get('message', 'No baseline found')})")
+    elif status == "EVALUATION_ERROR":
+        print(f"Status: EVALUATION_ERROR ({regression_res.get('message', 'Evaluation error occurred')})")
+    else:
+        print(f"Status: {status} ({regression_res.get('message', '')})")
     print("=" * 80 + "\n")
 
 
@@ -375,11 +408,17 @@ def run_evaluation(
         else:
             response_text = result.get("raw_llm_response") or "No generated response."
 
+        eval_contexts = result.get("evaluation_contexts", [])
+        has_empty_ctx = not bool(eval_contexts)
+        ret_status = "EMPTY_CONTEXT_ASSIGNED_FAILURE" if has_empty_ctx else "RETRIEVED"
+
         record = {
             "sample_id": s_id,
             "question": case["question"],
             "case_type": case.get("case_type", "general"),
             "has_explicit_attack_id": bool(case.get("has_explicit_attack_id", False)),
+            "has_empty_context": has_empty_ctx,
+            "retrieval_context_status": ret_status,
             "expected_attack_ids": exp_attack_ids,
             "retrieved_attack_ids": ret_attack_ids,
             "expected_d3fend_ids": exp_d3fend_ids,
@@ -407,7 +446,7 @@ def run_evaluation(
         ragas_samples_input.append({
             "sample_id": s_id,
             "question": case["question"],
-            "contexts": result.get("evaluation_contexts", []),
+            "contexts": eval_contexts,
             "response": response_text,
             "reference": case.get("reference_answer", ""),
             "is_fallback_generation": is_fallback,
@@ -429,9 +468,16 @@ def run_evaluation(
             "aggregate_scores": {
                 "mean_context_precision": None,
                 "mean_context_recall": None,
+                "mean_calculated_context_precision": None,
+                "mean_calculated_context_recall": None,
                 "mean_faithfulness": None,
                 "mean_answer_relevancy": None,
                 "mean_factual_correctness": None,
+                "evaluated_samples_count": len(case_eval_records),
+                "empty_context_count": sum(1 for c in case_eval_records if c.get("has_empty_context")),
+                "retrieved_context_count": sum(1 for c in case_eval_records if not c.get("has_empty_context")),
+                "llm_generation_count": sum(1 for c in case_eval_records if not c.get("is_fallback_generation")),
+                "fallback_generation_count": sum(1 for c in case_eval_records if c.get("is_fallback_generation")),
             },
         }
 
@@ -447,6 +493,7 @@ def run_evaluation(
 
     # 4. Assemble Final Report Object
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    empty_ctx_count = sum(1 for c in case_eval_records if c.get("has_empty_context"))
     report_data = {
         "metadata": {
             "evaluation_id": f"EVAL-{int(time.time())}",
@@ -454,6 +501,8 @@ def run_evaluation(
             "dataset_version": DATASET_VERSION,
             "dataset_path": str(dataset_path),
             "total_cases_evaluated": len(cases),
+            "empty_context_samples_count": empty_ctx_count,
+            "retrieved_context_samples_count": len(cases) - empty_ctx_count,
             "generation_model": settings.effective_llm_model,
             "generation_provider": ", ".join(sorted(list(model_providers_seen))),
             "evaluator_model": ragas_evaluator.model_name if not skip_ragas else "SKIPPED",
@@ -467,14 +516,24 @@ def run_evaluation(
 
     # 5. Baseline Comparison & Regression Check
     base_file = baseline_path or (Path(__file__).parent / "baseline.json")
-    regression_check = compare_against_baseline(
-        current_metrics={
-            "retrieval": agg_retrieval,
-            "ragas": ragas_result.get("aggregate_scores", {}),
-        },
-        baseline_path=base_file,
-        tolerance=tolerance,
-    )
+    if ragas_result.get("status") == "ERROR":
+        regression_check = {
+            "has_baseline": base_file.exists(),
+            "status": "EVALUATION_ERROR",
+            "passed": False,
+            "tolerance_used": tolerance,
+            "regressions": [],
+            "message": f"RAGAS evaluation failed: {ragas_result.get('reason')}",
+        }
+    else:
+        regression_check = compare_against_baseline(
+            current_metrics={
+                "retrieval": agg_retrieval,
+                "ragas": ragas_result.get("aggregate_scores", {}),
+            },
+            baseline_path=base_file,
+            tolerance=tolerance,
+        )
     report_data["regression_monitoring"] = regression_check
 
     # Baseline generation guardrails: Require explicit generate_baseline flag, complete dataset, and non-null RAGAS scores
@@ -516,6 +575,8 @@ def run_evaluation(
             with open(base_file, "w", encoding="utf-8") as f:
                 json.dump(baseline_payload, f, indent=2)
             print(f"Approved baseline successfully generated and saved to {base_file}")
+            regression_check["status"] = "PASSED"
+            regression_check["passed"] = True
 
     # 6. Export Results
     out_dir = output_dir or (Path(__file__).parent / "results")
@@ -524,7 +585,7 @@ def run_evaluation(
     # 7. Print Summary
     print_summary_table(report_data, regression_check)
 
-    return regression_check["passed"]
+    return regression_check["status"] == "PASSED"
 
 
 def main():

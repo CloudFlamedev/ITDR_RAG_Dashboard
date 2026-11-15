@@ -369,6 +369,7 @@ class RagasEvaluator:
             clean = [v for v in vals if v is not None]
             return round(sum(clean) / len(clean), 4) if clean else None
 
+        empty_context_count = 0
         per_sample = []
         metrics = self.get_metrics()
         cp_metric, cr_metric, faith_metric, ar_metric, fc_metric = metrics[:5]
@@ -379,6 +380,10 @@ class RagasEvaluator:
             s_id = s.get("sample_id", f"sample-{idx}")
             raw_contexts = s.get("contexts") or []
             contexts = [c for c in raw_contexts if c and str(c).strip()]
+            has_empty_context = len(contexts) == 0
+            if has_empty_context:
+                empty_context_count += 1
+
             is_fallback = bool(s.get("is_fallback_generation", False))
 
             raw_resp = s.get("response") or s.get("structured_report") or "Insufficient evidence to generate report."
@@ -387,15 +392,16 @@ class RagasEvaluator:
             q = s.get("question") or "Security advisory query."
 
             # 1. Retrieval Metrics Evaluation
-            # Requirement 2: Do NOT insert placeholder text. Handle empty contexts explicitly.
-            # Record missing context as a retrieval failure (0.0).
+            # Clearly distinguish assigned failure scores from actual RAGAS LLM calculations
             c_prec = None
             c_rec = None
+            retrieval_status = "RETRIEVED"
 
-            if not contexts:
-                logger.info(f"[{idx}/{len(samples_data)}] Sample {s_id}: Empty context supplied -> recording retrieval failure (0.0).")
+            if has_empty_context:
+                logger.info(f"[{idx}/{len(samples_data)}] Sample {s_id}: Empty context supplied -> assigning explicit failure score (0.0).")
                 c_prec = 0.0
                 c_rec = 0.0
+                retrieval_status = "EMPTY_CONTEXT_ASSIGNED_FAILURE"
             else:
                 try:
                     res_cp = await cp_metric.ascore(user_input=q, reference=ref, retrieved_contexts=contexts)
@@ -412,8 +418,7 @@ class RagasEvaluator:
                     c_rec = None
 
             # 2. Generation Metrics Evaluation
-            # Requirement 3: Exclude fallback generations from Faithfulness, Answer Relevancy, and Factual Correctness.
-            # Do not use fallback scores as generation-quality scores.
+            # Exclude fallback generations from Faithfulness, Answer Relevancy, and Factual Correctness.
             faith = None
             ans_rel = None
             fact_corr = None
@@ -425,7 +430,7 @@ class RagasEvaluator:
                 fact_corr = None
             else:
                 # Faithfulness evaluation
-                if not contexts:
+                if has_empty_context:
                     # Missing context means response cannot be faithful to retrieved evidence
                     faith = 0.0
                 else:
@@ -454,6 +459,9 @@ class RagasEvaluator:
 
             per_sample.append({
                 "sample_id": s_id,
+                "has_empty_context": has_empty_context,
+                "is_assigned_empty_context_failure": has_empty_context,
+                "retrieval_context_status": retrieval_status,
                 "is_fallback_generation": is_fallback,
                 "context_precision": c_prec,
                 "context_recall": c_rec,
@@ -467,16 +475,24 @@ class RagasEvaluator:
                 await asyncio.sleep(1.0)
 
         # 3. Aggregate Metrics Computation
-        # Fallback generations are excluded from generation metrics
+        retrieved_samples = [s for s in per_sample if not s.get("has_empty_context")]
         gen_samples = [s for s in per_sample if not s.get("is_fallback_generation")] if skip_generation_metrics_for_fallback else per_sample
 
         aggregate = {
+            # Overall retrieval metrics (includes 0.0 penalties for empty contexts)
             "mean_context_precision": _clean_mean([s["context_precision"] for s in per_sample]),
             "mean_context_recall": _clean_mean([s["context_recall"] for s in per_sample]),
+            # Pure calculated RAGAS scores strictly on samples where context was present
+            "mean_calculated_context_precision": _clean_mean([s["context_precision"] for s in retrieved_samples]) if retrieved_samples else None,
+            "mean_calculated_context_recall": _clean_mean([s["context_recall"] for s in retrieved_samples]) if retrieved_samples else None,
+            # Generation metrics (strictly excluding fallback synthesis)
             "mean_faithfulness": _clean_mean([s["faithfulness"] for s in gen_samples]) if gen_samples else None,
             "mean_answer_relevancy": _clean_mean([s["answer_relevancy"] for s in gen_samples]) if gen_samples else None,
             "mean_factual_correctness": _clean_mean([s["factual_correctness"] for s in gen_samples]) if gen_samples else None,
+            # Sample counters
             "evaluated_samples_count": len(samples_data),
+            "empty_context_count": empty_context_count,
+            "retrieved_context_count": len(samples_data) - empty_context_count,
             "llm_generation_count": len(gen_samples),
             "fallback_generation_count": len(samples_data) - len(gen_samples),
         }
@@ -497,12 +513,16 @@ class RagasEvaluator:
         """
         if not self.is_configured or not self._llm_wrapper:
             logger.warning("RAGAS evaluator not configured (missing evaluator API key). Skipping RAGAS scores.")
+            empty_count = sum(1 for s in samples_data if not (s.get("contexts") or []))
             return {
                 "status": "SKIPPED",
                 "reason": "Evaluator LLM API key not configured in environment.",
                 "per_sample_scores": [
                     {
                         "sample_id": s.get("sample_id"),
+                        "has_empty_context": not bool(s.get("contexts") or []),
+                        "is_assigned_empty_context_failure": False,
+                        "retrieval_context_status": "SKIPPED",
                         "is_fallback_generation": bool(s.get("is_fallback_generation", False)),
                         "context_precision": None,
                         "context_recall": None,
@@ -515,10 +535,14 @@ class RagasEvaluator:
                 "aggregate_scores": {
                     "mean_context_precision": None,
                     "mean_context_recall": None,
+                    "mean_calculated_context_precision": None,
+                    "mean_calculated_context_recall": None,
                     "mean_faithfulness": None,
                     "mean_answer_relevancy": None,
                     "mean_factual_correctness": None,
                     "evaluated_samples_count": len(samples_data),
+                    "empty_context_count": empty_count,
+                    "retrieved_context_count": len(samples_data) - empty_count,
                     "llm_generation_count": 0,
                     "fallback_generation_count": sum(1 for s in samples_data if s.get("is_fallback_generation")),
                 },
@@ -542,6 +566,7 @@ class RagasEvaluator:
                 return asyncio.run(self._aevaluate_samples(samples_data, skip_generation_metrics_for_fallback))
         except Exception as exc:
             logger.error(f"RAGAS evaluation failed: {exc}", exc_info=True)
+            empty_count = sum(1 for s in samples_data if not (s.get("contexts") or []))
             return {
                 "status": "ERROR",
                 "reason": str(exc),
@@ -549,10 +574,14 @@ class RagasEvaluator:
                 "aggregate_scores": {
                     "mean_context_precision": None,
                     "mean_context_recall": None,
+                    "mean_calculated_context_precision": None,
+                    "mean_calculated_context_recall": None,
                     "mean_faithfulness": None,
                     "mean_answer_relevancy": None,
                     "mean_factual_correctness": None,
                     "evaluated_samples_count": len(samples_data),
+                    "empty_context_count": empty_count,
+                    "retrieved_context_count": len(samples_data) - empty_count,
                     "llm_generation_count": 0,
                     "fallback_generation_count": 0,
                 },

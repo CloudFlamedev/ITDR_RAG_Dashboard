@@ -872,13 +872,15 @@ def test_api_response_and_state_propagation_fields():
 
 
 # ==============================================================================
-# 19. RAGAS Collections API Imports & Initialization (Issue 1)
+# 19. RAGAS Collections API Imports & Initialization (Issue 1 & 2)
 # ==============================================================================
 
 def test_ragas_collections_imports_and_initialization():
     """
-    Issue 1: Verify all 5 metrics can be imported and initialized directly
+    Issue 1 & 2: Verify all 5 metrics can be imported and initialized directly
     from ragas.metrics.collections using BaseRagasEmbedding and Instructor LLM.
+    Tests the real evaluator initialization path using mocked credentials and
+    confirms all 5 metrics receive their LLM and embedding dependencies.
     """
     from ragas.metrics.collections import (
         ContextPrecision,
@@ -901,7 +903,7 @@ def test_ragas_collections_imports_and_initialization():
     mock_emb = ITDRRagasEmbeddings()
     assert isinstance(mock_emb, BaseRagasEmbedding)
 
-    # Initialize all 5 collections metrics directly
+    # 1. Initialize all 5 collections metrics directly
     cp = ContextPrecision(llm=mock_llm)
     cr = ContextRecall(llm=mock_llm)
     faith = Faithfulness(llm=mock_llm)
@@ -913,30 +915,50 @@ def test_ragas_collections_imports_and_initialization():
         assert hasattr(m, "score")
         assert hasattr(m, "name")
 
-    # Verify RagasEvaluator.get_metrics() initializes collections metrics
-    evaluator = RagasEvaluator()
-    evaluator._llm_wrapper = mock_llm
-    evaluator._embeddings_wrapper = mock_emb
-    evaluator.is_configured = True
-    metrics = evaluator.get_metrics()
+    # 2. Test real evaluator initialization path with mocked credentials and real client instantiation
+    real_evaluator = RagasEvaluator(
+        api_key="mock-groq-evaluator-key-abcdef123456",
+        base_url="https://api.groq.com/openai/v1",
+        model_name="openai/gpt-oss-20b",
+    )
+    assert real_evaluator.is_configured is True
+    assert real_evaluator._llm_wrapper is not None
+    assert isinstance(real_evaluator._llm_wrapper, InstructorBaseRagasLLM)
+    assert isinstance(real_evaluator._embeddings_wrapper, BaseRagasEmbedding)
+
+    # Confirm all five metrics initialize with their expected dependencies
+    assert isinstance(real_evaluator.context_precision, ContextPrecision)
+    assert real_evaluator.context_precision.llm is real_evaluator._llm_wrapper
+
+    assert isinstance(real_evaluator.context_recall, ContextRecall)
+    assert real_evaluator.context_recall.llm is real_evaluator._llm_wrapper
+
+    assert isinstance(real_evaluator.faithfulness, Faithfulness)
+    assert real_evaluator.faithfulness.llm is real_evaluator._llm_wrapper
+
+    assert isinstance(real_evaluator.answer_relevancy, AnswerRelevancy)
+    assert real_evaluator.answer_relevancy.llm is real_evaluator._llm_wrapper
+    assert real_evaluator.answer_relevancy.embeddings is real_evaluator._embeddings_wrapper
+
+    assert isinstance(real_evaluator.factual_correctness, FactualCorrectness)
+    assert real_evaluator.factual_correctness.llm is real_evaluator._llm_wrapper
+
+    metrics = real_evaluator.get_metrics()
     assert len(metrics) == 5
     metric_names = [m.name for m in metrics]
-    assert "context_precision" in metric_names
-    assert "context_recall" in metric_names
-    assert "faithfulness" in metric_names
-    assert "answer_relevancy" in metric_names
-    assert "factual_correctness" in metric_names
+    assert metric_names == ["context_precision", "context_recall", "faithfulness", "answer_relevancy", "factual_correctness"]
 
 
 # ==============================================================================
-# 20. Explicit Empty Context Handling & No Placeholder Strings (Issue 2)
+# 20. Explicit Empty Context Handling & Distinct Failure Tracking (Issue 2 & 3)
 # ==============================================================================
 
 @pytest.mark.asyncio
 async def test_empty_retrieval_context_handling():
     """
-    Issue 2: Do not insert placeholder text like 'No retrieved context supplied to model.'
+    Issue 2 & 3: Do not insert placeholder text like 'No retrieved context supplied to model.'
     Record missing context explicitly as a retrieval failure (0.0).
+    Clearly distinguish assigned empty-context failures from actual RAGAS calculations.
     """
     from evaluation.ragas_evaluator import RagasEvaluator
     from ragas.llms.base import InstructorBaseRagasLLM
@@ -976,6 +998,9 @@ async def test_empty_retrieval_context_handling():
     per_s = result["per_sample_scores"][0]
 
     # Explicit failure for retrieval metrics when context is empty
+    assert per_s["has_empty_context"] is True
+    assert per_s["is_assigned_empty_context_failure"] is True
+    assert per_s["retrieval_context_status"] == "EMPTY_CONTEXT_ASSIGNED_FAILURE"
     assert per_s["context_precision"] == 0.0, "Empty context must score 0.0 for context_precision"
     assert per_s["context_recall"] == 0.0, "Empty context must score 0.0 for context_recall"
     assert per_s["faithfulness"] == 0.0, "Empty context must score 0.0 for faithfulness"
@@ -983,6 +1008,15 @@ async def test_empty_retrieval_context_handling():
     # Generation metrics still evaluated for valid non-fallback response
     assert per_s["answer_relevancy"] == 0.95
     assert per_s["factual_correctness"] == 0.90
+
+    # Aggregate counts and distinct metrics
+    agg = result["aggregate_scores"]
+    assert agg["empty_context_count"] == 1
+    assert agg["retrieved_context_count"] == 0
+    assert agg["mean_context_precision"] == 0.0
+    assert agg["mean_context_recall"] == 0.0
+    assert agg["mean_calculated_context_precision"] is None
+    assert agg["mean_calculated_context_recall"] is None
 
 
 # ==============================================================================
@@ -1062,16 +1096,15 @@ async def test_fallback_generations_excluded_and_all_fallback_returns_na():
 
 
 # ==============================================================================
-# 22. Missing Baseline Reported as NOT_BASELINED (Issue 5)
+# 22. Missing Baseline Reported as NOT_BASELINED (Issue 4 & 5)
 # ==============================================================================
 
 def test_missing_baseline_reported_as_not_baselined(tmp_path):
     """
-    Issue 5: Make sure a missing baseline is clearly reported as NOT BASELINED,
-    rather than presenting it as a fully validated regression pass.
+    Issue 4: Make sure a missing baseline is clearly reported as NOT BASELINED,
+    rather than presenting it as a fully validated regression pass (passed: False).
     """
     from evaluation.run_evaluation import compare_against_baseline
-    from pathlib import Path
 
     non_existent_baseline = tmp_path / "does_not_exist_baseline.json"
     dummy_metrics = {
@@ -1089,5 +1122,100 @@ def test_missing_baseline_reported_as_not_baselined(tmp_path):
 
     assert result["has_baseline"] is False
     assert result["status"] == "NOT_BASELINED"
+    assert result["passed"] is False
     assert "No approved baseline found" in result["message"]
+
+
+# ==============================================================================
+# 23. Four Regression Statuses and Error Handling (Issue 4)
+# ==============================================================================
+
+def test_four_regression_statuses_and_error_handling(tmp_path):
+    """
+    Issue 4: Validate four clear statuses: PASSED, FAILED, NOT_BASELINED, EVALUATION_ERROR.
+    Ensure NOT_BASELINED, FAILED, and EVALUATION_ERROR never report passed: True.
+    """
+    from evaluation.run_evaluation import compare_against_baseline
+    import json
+
+    dummy_curr = {
+        "retrieval": {
+            "combined": {
+                "mean_attack_precision_at_k": 0.85,
+                "mean_attack_recall_at_k": 0.80,
+            },
+            "no_id_queries": {
+                "mean_attack_precision_at_k": 0.75,
+                "mean_attack_recall_at_k": 0.70,
+            }
+        },
+        "ragas": {
+            "mean_context_precision": 0.88,
+            "mean_context_recall": 0.82,
+            "mean_faithfulness": 0.90,
+            "mean_answer_relevancy": 0.89,
+            "mean_factual_correctness": 0.85,
+        }
+    }
+
+    # 1. NOT_BASELINED
+    missing_file = tmp_path / "non_existent.json"
+    res_not_baselined = compare_against_baseline(dummy_curr, missing_file)
+    assert res_not_baselined["status"] == "NOT_BASELINED"
+    assert res_not_baselined["passed"] is False
+
+    # 2. PASSED (scores match or are within tolerance)
+    baseline_passed_file = tmp_path / "baseline_passed.json"
+    with open(baseline_passed_file, "w", encoding="utf-8") as f:
+        json.dump({
+            "aggregate_metrics": dummy_curr
+        }, f)
+    res_passed = compare_against_baseline(dummy_curr, baseline_passed_file, tolerance=0.10)
+    assert res_passed["status"] == "PASSED"
+    assert res_passed["passed"] is True
+    assert len(res_passed["regressions"]) == 0
+
+    # 3. FAILED (regression exceeds tolerance)
+    baseline_high_file = tmp_path / "baseline_high.json"
+    high_metrics = {
+        "retrieval": {
+            "combined": {
+                "mean_attack_precision_at_k": 0.99,  # Current is 0.85 -> dropped > 10%
+                "mean_attack_recall_at_k": 0.80,
+            },
+            "no_id_queries": {
+                "mean_attack_precision_at_k": 0.75,
+                "mean_attack_recall_at_k": 0.70,
+            }
+        },
+        "ragas": {
+            "mean_context_precision": 0.88,
+            "mean_context_recall": 0.82,
+            "mean_faithfulness": 0.90,
+            "mean_answer_relevancy": 0.89,
+            "mean_factual_correctness": 0.85,
+        }
+    }
+    with open(baseline_high_file, "w", encoding="utf-8") as f:
+        json.dump({"aggregate_metrics": high_metrics}, f)
+    res_failed = compare_against_baseline(dummy_curr, baseline_high_file, tolerance=0.10)
+    assert res_failed["status"] == "FAILED"
+    assert res_failed["passed"] is False
+    assert len(res_failed["regressions"]) == 1
+    assert res_failed["regressions"][0]["metric"] == "combined_attack_precision_at_k"
+
+    # 4. EVALUATION_ERROR (malformed baseline or missing aggregate_metrics)
+    corrupted_file = tmp_path / "corrupted_baseline.json"
+    with open(corrupted_file, "w", encoding="utf-8") as f:
+        f.write("{ INVALID JSON")
+    res_err1 = compare_against_baseline(dummy_curr, corrupted_file)
+    assert res_err1["status"] == "EVALUATION_ERROR"
+    assert res_err1["passed"] is False
+
+    empty_metrics_file = tmp_path / "empty_metrics_baseline.json"
+    with open(empty_metrics_file, "w", encoding="utf-8") as f:
+        json.dump({"foo": "bar"}, f)
+    res_err2 = compare_against_baseline(dummy_curr, empty_metrics_file)
+    assert res_err2["status"] == "EVALUATION_ERROR"
+    assert res_err2["passed"] is False
 
