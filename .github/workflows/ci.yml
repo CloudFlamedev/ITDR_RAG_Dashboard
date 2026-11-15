@@ -81,7 +81,7 @@ jobs:
         working-directory: backend
         env:
           PYTHONPATH: .
-          DATABASE_URL: sqlite:///:memory:
+          DATABASE_URL: "sqlite:///:memory:"
           GROQ_API_KEY: mock-ci-groq-key
           XAI_API_KEY: mock-ci-xai-key
           EVALUATOR_LLM_API_KEY: mock-ci-evaluator-key
