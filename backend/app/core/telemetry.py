@@ -136,3 +136,50 @@ def log_threat_score(
     except Exception as e:
         logger.debug(f"Langfuse score creation skipped ({name}): {e}")
         return False
+
+
+def log_monitoring_metrics(
+    trace_id: Optional[str] = None,
+    metrics: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """
+    Layer 3 Live Production Monitoring: Records deterministic evaluation metrics
+    on the active Langfuse trace without making any additional LLM calls.
+    Tracks unsupported IDs, invalid citations, vector vs reranker scores, and evidence sufficiency.
+    """
+    active_trace_id = trace_id or get_current_trace_id()
+    if not active_trace_id or not metrics:
+        return False
+
+    success = True
+    for key, val in metrics.items():
+        if val is None:
+            continue
+        try:
+            if isinstance(val, bool):
+                cat_val = "TRUE" if val else "FALSE"
+                log_threat_score(
+                    name=key,
+                    value=cat_val,
+                    trace_id=active_trace_id,
+                    comment=f"Deterministic live monitoring check: {key}={cat_val}",
+                )
+            elif isinstance(val, (int, float)):
+                log_threat_score(
+                    name=key,
+                    value=float(val),
+                    trace_id=active_trace_id,
+                    comment=f"Deterministic live monitoring metric: {key}={val}",
+                )
+            elif isinstance(val, str):
+                log_threat_score(
+                    name=key,
+                    value=val,
+                    trace_id=active_trace_id,
+                    comment=f"Deterministic live monitoring signal: {key}={val}",
+                )
+        except Exception as exc:
+            logger.debug(f"Failed logging monitoring metric {key}: {exc}")
+            success = False
+
+    return success

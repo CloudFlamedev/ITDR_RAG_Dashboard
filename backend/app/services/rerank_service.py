@@ -217,8 +217,15 @@ class RerankService:
                     if is_exact:
                         # Keep exact indicators locked at peak confidence
                         final_score = 1.0
+                        r_score = 1.0
                     else:
                         final_score = round(float(rerank_score), 4)
+                        r_score = final_score
+
+                    if hasattr(c, "rerank_score"):
+                        c.rerank_score = r_score
+                    elif isinstance(c, dict):
+                        c["rerank_score"] = r_score
 
                     if hasattr(c, "score"):
                         c.score = final_score

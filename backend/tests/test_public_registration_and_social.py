@@ -814,7 +814,7 @@ def test_threat_feed_ownership_isolation(client, db):
     assert r2.status_code == 404
 
     # 3. User 2 listing feeds does not include b1, but does include b_demo
-    list_u2 = client_u2.get("/api/identity/bulletins")
+    list_u2 = client_u2.get("/api/identity/bulletins?limit=100")
     assert list_u2.status_code == 200
     feed_ids_u2 = [b["bulletin_id"] for b in list_u2.json()["bulletins"]]
     assert b1_id not in feed_ids_u2

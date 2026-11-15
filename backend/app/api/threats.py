@@ -16,6 +16,7 @@ from app.core.telemetry import (
     propagate_attributes,
     CallbackHandler,
     log_threat_score,
+    log_monitoring_metrics,
     get_current_trace_id,
     mask_sensitive_data,
     flush_telemetry,
@@ -256,6 +257,27 @@ def analyze_threat(
             name="threat_severity",
             value=severity,
             comment=f"Assigned threat severity level: {severity}",
+        )
+        # Layer 3 Live Production Monitoring: Deterministic checks (no LLM calls)
+        unsupported_att = result.get("unsupported_attack_ids", [])
+        unsupported_d3f = result.get("unsupported_d3fend_ids", [])
+        invalid_cits = result.get("invalid_citations_count", 0)
+        is_insufficient = result.get("status") == "INSUFFICIENT_EVIDENCE" or result.get("insufficient_evidence", False)
+        highest_vec = float(result.get("highest_vector_similarity", 0.0) or 0.0)
+        highest_rerank = result.get("highest_rerank_score")
+
+        log_monitoring_metrics(
+            trace_id=trace_id,
+            metrics={
+                "unsupported_attack_ids_count": len(unsupported_att),
+                "unsupported_d3fend_ids_count": len(unsupported_d3f),
+                "invalid_citations_count": invalid_cits,
+                "highest_vector_similarity": highest_vec,
+                "highest_rerank_score": highest_rerank,
+                "insufficient_evidence": is_insufficient,
+                "has_explicit_attack_id": bool(result.get("extracted_indicators", {}).get("attack_ids")),
+                "is_fallback_generation": bool(result.get("is_fallback_generation", False)),
+            },
         )
 
     # Immediately flush telemetry to avoid event loss in background workers

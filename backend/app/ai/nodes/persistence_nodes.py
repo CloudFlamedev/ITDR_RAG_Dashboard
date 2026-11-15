@@ -21,7 +21,30 @@ def persist_report_and_trace(state: ThreatAnalysisState) -> Dict[str, Any]:
     report_id = state.get("report_id") or f"REP-{datetime.datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     report_dict = state.get("structured_report") or {}
     citations_data = state.get("citations") or []
+    # Safe Evaluation Execution Mode: Skip database persistence and quotas during evaluation
+    if state.get("evaluation_mode", False):
+        logger.info(f"Evaluation mode active: skipping DB persistence and quota consumption for {report_id}.")
+        this_step = {
+            "step_name": "persist_report_and_trace",
+            "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "status": "SKIPPED",
+            "duration_ms": round((time.perf_counter() - start) * 1000, 2),
+            "metadata": {
+                "evaluation_mode": True,
+                "persisted": False,
+                "report_id": report_id,
+                "citations_count": len(citations_data),
+            },
+            "error": None,
+        }
+        all_steps = state.get("trace_steps", []) + [this_step]
+        return {
+            "report_id": report_id,
+            "trace_steps": all_steps,
+        }
+
     status = state.get("status", "COMPLETED")
+    all_steps = state.get("trace_steps", [])
 
     db: Session = SessionLocal()
     try:

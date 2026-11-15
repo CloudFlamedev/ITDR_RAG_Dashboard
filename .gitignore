@@ -29,3 +29,8 @@ frontend/node_modules/
 .idea/
 .DS_Store
 *.log
+
+# Evaluation run outputs (keep directory with .gitkeep)
+backend/evaluation/results/*.json
+backend/evaluation/results/*.csv
+!backend/evaluation/results/.gitkeep

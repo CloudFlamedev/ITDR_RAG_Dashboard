@@ -50,6 +50,9 @@ def retrieve_attack_context(state: ThreatAnalysisState) -> Dict[str, Any]:
     return {
         "candidate_techniques": retrieval_res["candidates"],
         "highest_retrieval_confidence": retrieval_res["highest_confidence"],
+        "highest_vector_similarity": retrieval_res.get("highest_vector_similarity", 0.0),
+        "highest_rerank_score": retrieval_res.get("highest_rerank_score"),
+        "rerank_applied": retrieval_res.get("rerank_applied", False),
         "insufficient_evidence": retrieval_res["insufficient_evidence"],
         "trace_steps": state["trace_steps"] + [trace_step],
     }
