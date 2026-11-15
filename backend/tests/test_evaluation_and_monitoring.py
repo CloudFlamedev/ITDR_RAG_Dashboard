@@ -870,3 +870,224 @@ def test_api_response_and_state_propagation_fields():
     assert "invalid_citations_count" in result
     assert isinstance(result["invalid_citations_count"], int)
 
+
+# ==============================================================================
+# 19. RAGAS Collections API Imports & Initialization (Issue 1)
+# ==============================================================================
+
+def test_ragas_collections_imports_and_initialization():
+    """
+    Issue 1: Verify all 5 metrics can be imported and initialized directly
+    from ragas.metrics.collections using BaseRagasEmbedding and Instructor LLM.
+    """
+    from ragas.metrics.collections import (
+        ContextPrecision,
+        ContextRecall,
+        Faithfulness,
+        AnswerRelevancy,
+        FactualCorrectness,
+    )
+    from ragas.embeddings.base import BaseRagasEmbedding
+    from ragas.llms.base import InstructorBaseRagasLLM
+    from evaluation.ragas_evaluator import RagasEvaluator, ITDRRagasEmbeddings
+
+    class _TestInstructorLLM(InstructorBaseRagasLLM):
+        def generate(self, *args, **kwargs):
+            pass
+        async def agenerate(self, *args, **kwargs):
+            pass
+
+    mock_llm = _TestInstructorLLM()
+    mock_emb = ITDRRagasEmbeddings()
+    assert isinstance(mock_emb, BaseRagasEmbedding)
+
+    # Initialize all 5 collections metrics directly
+    cp = ContextPrecision(llm=mock_llm)
+    cr = ContextRecall(llm=mock_llm)
+    faith = Faithfulness(llm=mock_llm)
+    ar = AnswerRelevancy(llm=mock_llm, embeddings=mock_emb)
+    fc = FactualCorrectness(llm=mock_llm)
+
+    for m in [cp, cr, faith, ar, fc]:
+        assert hasattr(m, "ascore")
+        assert hasattr(m, "score")
+        assert hasattr(m, "name")
+
+    # Verify RagasEvaluator.get_metrics() initializes collections metrics
+    evaluator = RagasEvaluator()
+    evaluator._llm_wrapper = mock_llm
+    evaluator._embeddings_wrapper = mock_emb
+    evaluator.is_configured = True
+    metrics = evaluator.get_metrics()
+    assert len(metrics) == 5
+    metric_names = [m.name for m in metrics]
+    assert "context_precision" in metric_names
+    assert "context_recall" in metric_names
+    assert "faithfulness" in metric_names
+    assert "answer_relevancy" in metric_names
+    assert "factual_correctness" in metric_names
+
+
+# ==============================================================================
+# 20. Explicit Empty Context Handling & No Placeholder Strings (Issue 2)
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_empty_retrieval_context_handling():
+    """
+    Issue 2: Do not insert placeholder text like 'No retrieved context supplied to model.'
+    Record missing context explicitly as a retrieval failure (0.0).
+    """
+    from evaluation.ragas_evaluator import RagasEvaluator
+    from ragas.llms.base import InstructorBaseRagasLLM
+    from unittest.mock import AsyncMock
+
+    class _TestInstructorLLM(InstructorBaseRagasLLM):
+        def generate(self, *args, **kwargs):
+            pass
+        async def agenerate(self, *args, **kwargs):
+            pass
+
+    evaluator = RagasEvaluator()
+    evaluator._llm_wrapper = _TestInstructorLLM()
+    evaluator.is_configured = True
+
+    # Mock collections metrics
+    mock_ar = AsyncMock()
+    mock_ar.ascore.return_value = 0.95
+    evaluator.answer_relevancy = mock_ar
+
+    mock_fc = AsyncMock()
+    mock_fc.ascore.return_value = 0.90
+    evaluator.factual_correctness = mock_fc
+
+    # Sample with EMPTY contexts
+    samples = [{
+        "sample_id": "test-empty-ctx",
+        "question": "What is Kerberoasting?",
+        "contexts": [],  # Completely empty context
+        "response": "Kerberoasting targets SPNs.",
+        "reference": "Kerberoasting is T1558.003.",
+        "is_fallback_generation": False,
+    }]
+
+    result = await evaluator._aevaluate_samples(samples)
+    assert result["status"] == "SUCCESS"
+    per_s = result["per_sample_scores"][0]
+
+    # Explicit failure for retrieval metrics when context is empty
+    assert per_s["context_precision"] == 0.0, "Empty context must score 0.0 for context_precision"
+    assert per_s["context_recall"] == 0.0, "Empty context must score 0.0 for context_recall"
+    assert per_s["faithfulness"] == 0.0, "Empty context must score 0.0 for faithfulness"
+
+    # Generation metrics still evaluated for valid non-fallback response
+    assert per_s["answer_relevancy"] == 0.95
+    assert per_s["factual_correctness"] == 0.90
+
+
+# ==============================================================================
+# 21. Fallback Generation Exclusion & All-Fallback Handling (Issue 3)
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_fallback_generations_excluded_and_all_fallback_returns_na():
+    """
+    Issue 3: Exclude fallback generations from Faithfulness, Answer Relevancy,
+    and Factual Correctness. If all generations are fallback, return None (N/A).
+    """
+    from evaluation.ragas_evaluator import RagasEvaluator
+    from ragas.llms.base import InstructorBaseRagasLLM
+    from unittest.mock import AsyncMock
+
+    class _TestInstructorLLM(InstructorBaseRagasLLM):
+        def generate(self, *args, **kwargs):
+            pass
+        async def agenerate(self, *args, **kwargs):
+            pass
+
+    evaluator = RagasEvaluator()
+    evaluator._llm_wrapper = _TestInstructorLLM()
+    evaluator.is_configured = True
+
+    # Mock retrieval metrics
+    mock_cp = AsyncMock()
+    mock_cp.ascore.return_value = 0.85
+    evaluator.context_precision = mock_cp
+
+    mock_cr = AsyncMock()
+    mock_cr.ascore.return_value = 0.80
+    evaluator.context_recall = mock_cr
+
+    # All samples are fallback generations
+    samples = [
+        {
+            "sample_id": "fb-1",
+            "question": "Q1",
+            "contexts": ["Evidence 1"],
+            "response": "Fallback response 1",
+            "reference": "Ref 1",
+            "is_fallback_generation": True,
+        },
+        {
+            "sample_id": "fb-2",
+            "question": "Q2",
+            "contexts": ["Evidence 2"],
+            "response": "Fallback response 2",
+            "reference": "Ref 2",
+            "is_fallback_generation": True,
+        },
+    ]
+
+    result = await evaluator._aevaluate_samples(samples, skip_generation_metrics_for_fallback=True)
+    assert result["status"] == "SUCCESS"
+
+    # Retrieval metrics must still be computed
+    for s in result["per_sample_scores"]:
+        assert s["context_precision"] == 0.85
+        assert s["context_recall"] == 0.80
+        # Generation metrics MUST be excluded for fallback samples
+        assert s["faithfulness"] is None
+        assert s["answer_relevancy"] is None
+        assert s["factual_correctness"] is None
+
+    # Aggregate scores: retrieval present, generation MUST be None (displays as N/A)
+    agg = result["aggregate_scores"]
+    assert agg["mean_context_precision"] == 0.85
+    assert agg["mean_context_recall"] == 0.80
+    assert agg["mean_faithfulness"] is None
+    assert agg["mean_answer_relevancy"] is None
+    assert agg["mean_factual_correctness"] is None
+    assert agg["fallback_generation_count"] == 2
+    assert agg["llm_generation_count"] == 0
+
+
+# ==============================================================================
+# 22. Missing Baseline Reported as NOT_BASELINED (Issue 5)
+# ==============================================================================
+
+def test_missing_baseline_reported_as_not_baselined(tmp_path):
+    """
+    Issue 5: Make sure a missing baseline is clearly reported as NOT BASELINED,
+    rather than presenting it as a fully validated regression pass.
+    """
+    from evaluation.run_evaluation import compare_against_baseline
+    from pathlib import Path
+
+    non_existent_baseline = tmp_path / "does_not_exist_baseline.json"
+    dummy_metrics = {
+        "retrieval": {
+            "combined": {"mean_attack_precision_at_k": 0.8, "mean_attack_recall_at_k": 0.8}
+        },
+        "ragas": {
+            "mean_context_precision": 0.9,
+            "mean_context_recall": 0.9,
+            "mean_faithfulness": 0.9,
+        }
+    }
+
+    result = compare_against_baseline(dummy_metrics, non_existent_baseline)
+
+    assert result["has_baseline"] is False
+    assert result["status"] == "NOT_BASELINED"
+    assert "No approved baseline found" in result["message"]
+

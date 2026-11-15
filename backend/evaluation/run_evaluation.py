@@ -121,9 +121,10 @@ def compare_against_baseline(
         logger.info(f"No approved baseline file found at {baseline_path}. Regression check skipped.")
         return {
             "has_baseline": False,
+            "status": "NOT_BASELINED",
             "passed": True,
             "regressions": [],
-            "message": "First evaluation run: save as baseline for subsequent regression checks.",
+            "message": f"No approved baseline found at {baseline_path}. Run with --generate-baseline after review.",
         }
 
     with open(baseline_path, "r", encoding="utf-8") as f:
@@ -172,6 +173,7 @@ def compare_against_baseline(
     passed = len(regressions) == 0
     return {
         "has_baseline": True,
+        "status": "PASSED" if passed else "FAILED",
         "passed": passed,
         "tolerance_used": tolerance,
         "regressions": regressions,
@@ -286,7 +288,7 @@ def print_summary_table(report: Dict[str, Any], regression_res: Dict[str, Any]):
 
     print("2. RAGAS AGENTIC RAG METRICS")
     print("-" * 80)
-    def _fmt(v): return f"{v:.4f}" if v is not None else "N/A (Skipped)"
+    def _fmt(v): return f"{v:.4f}" if v is not None else "N/A"
     print(f"Context Precision:     {_fmt(ragas_res.get('mean_context_precision'))}")
     print(f"Context Recall:        {_fmt(ragas_res.get('mean_context_recall'))}")
     print(f"Faithfulness:          {_fmt(ragas_res.get('mean_faithfulness'))}")
@@ -297,7 +299,7 @@ def print_summary_table(report: Dict[str, Any], regression_res: Dict[str, Any]):
     print("3. REGRESSION MONITORING")
     print("-" * 80)
     if not regression_res.get("has_baseline"):
-        print(f"Status: PASS ({regression_res.get('message')})")
+        print(f"Status: NOT BASELINED ({regression_res.get('message')})")
     elif regression_res.get("passed"):
         print(f"Status: PASS (No regression detected against baseline, tolerance={regression_res.get('tolerance_used')*100:.0f}%)")
     else:

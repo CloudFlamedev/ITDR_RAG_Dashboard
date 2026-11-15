@@ -25,7 +25,7 @@ if "langchain_community.chat_models.vertexai" not in sys.modules:
         shim.ChatVertexAI = ChatVertexAI
     sys.modules["langchain_community.chat_models.vertexai"] = shim
 
-from ragas.embeddings.base import BaseRagasEmbeddings
+from ragas.embeddings.base import BaseRagasEmbedding
 from app.core.config import get_settings
 from app.services.embedding_service import EmbeddingService
 
@@ -128,29 +128,36 @@ def format_report_for_evaluation(report: Any) -> str:
     return "\n".join(lines)
 
 
-class ITDRRagasEmbeddings(BaseRagasEmbeddings):
-    """Adapter bridging ITDR EmbeddingService to Ragas BaseRagasEmbeddings interface."""
+class ITDRRagasEmbeddings(BaseRagasEmbedding):
+    """Adapter bridging ITDR EmbeddingService to Ragas modern BaseRagasEmbedding interface."""
     def __init__(self, service: Optional[EmbeddingService] = None):
         super().__init__()
         self.service = service or EmbeddingService()
 
-    def embed_text(self, text: str) -> List[float]:
+    def embed_text(self, text: str, **kwargs: Any) -> List[float]:
         return self.service.embed_query(text)
 
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    async def aembed_text(self, text: str, **kwargs: Any) -> List[float]:
+        return self.embed_text(text, **kwargs)
+
+    def embed_texts(self, texts: List[str], **kwargs: Any) -> List[List[float]]:
         return self.service.embed_documents(texts)
 
+    async def aembed_texts(self, texts: List[str], **kwargs: Any) -> List[List[float]]:
+        return self.embed_texts(texts, **kwargs)
+
+    # Legacy method compatibility
     def embed_query(self, text: str) -> List[float]:
-        return self.service.embed_query(text)
+        return self.embed_text(text)
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        return self.service.embed_documents(texts)
+        return self.embed_texts(texts)
 
     async def aembed_query(self, text: str) -> List[float]:
-        return self.embed_query(text)
+        return self.embed_text(text)
 
     async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
-        return self.embed_documents(texts)
+        return self.embed_texts(texts)
 
 
 class RagasEvaluator:
@@ -214,15 +221,28 @@ class RagasEvaluator:
 
         self._llm_wrapper = None
         self._embeddings_wrapper = None
+        self.context_precision = None
+        self.context_recall = None
+        self.faithfulness = None
+        self.answer_relevancy = None
+        self.factual_correctness = None
+
         if self.is_configured:
             self._init_ragas_components()
 
     def _init_ragas_components(self):
-        """Initializes Ragas LLM factory and embeddings adapter."""
+        """Initializes Ragas LLM factory, embeddings adapter, and collections metrics."""
         try:
             import instructor
             from openai import OpenAI
             from ragas.llms import llm_factory
+            from ragas.metrics.collections import (
+                ContextPrecision,
+                ContextRecall,
+                Faithfulness,
+                AnswerRelevancy,
+                FactualCorrectness,
+            )
 
             client = OpenAI(api_key=self.api_key, base_url=self.base_url, max_retries=10, timeout=90)
             mode = instructor.Mode.MD_JSON if self.is_groq else instructor.Mode.JSON
@@ -235,12 +255,27 @@ class RagasEvaluator:
                 **extra_kwargs,
             )
             self._embeddings_wrapper = ITDRRagasEmbeddings()
-            logger.info(f"Initialized RAGAS evaluator LLM ({self.model_name} at {self.base_url}) and ITDR embeddings.")
+
+            # Initialize collections metrics
+            self.context_precision = ContextPrecision(llm=self._llm_wrapper)
+            self.context_recall = ContextRecall(llm=self._llm_wrapper)
+            self.faithfulness = Faithfulness(llm=self._llm_wrapper)
+            self.answer_relevancy = AnswerRelevancy(llm=self._llm_wrapper, embeddings=self._embeddings_wrapper)
+            self.factual_correctness = FactualCorrectness(llm=self._llm_wrapper)
+
+            logger.info(f"Initialized RAGAS evaluator LLM ({self.model_name} at {self.base_url}), embeddings, and collections metrics.")
         except Exception as e:
             logger.warning(f"Failed to initialize RAGAS components via llm_factory: {e}. Attempting fallback...")
             try:
                 from langchain_openai import ChatOpenAI
                 from ragas.llms import LangchainLLMWrapper
+                from ragas.metrics.collections import (
+                    ContextPrecision,
+                    ContextRecall,
+                    Faithfulness,
+                    AnswerRelevancy,
+                    FactualCorrectness,
+                )
                 lc_llm = ChatOpenAI(
                     api_key=self.api_key,
                     base_url=self.base_url,
@@ -251,28 +286,206 @@ class RagasEvaluator:
                 )
                 self._llm_wrapper = LangchainLLMWrapper(lc_llm)
                 self._embeddings_wrapper = ITDRRagasEmbeddings()
+                self.context_precision = ContextPrecision(llm=self._llm_wrapper)
+                self.context_recall = ContextRecall(llm=self._llm_wrapper)
+                self.faithfulness = Faithfulness(llm=self._llm_wrapper)
+                self.answer_relevancy = AnswerRelevancy(llm=self._llm_wrapper, embeddings=self._embeddings_wrapper)
+                self.factual_correctness = FactualCorrectness(llm=self._llm_wrapper)
                 logger.info(f"Initialized RAGAS evaluator fallback with Langchain wrapper ({self.model_name}).")
             except Exception as e2:
                 logger.warning(f"Failed to initialize RAGAS components: {e2}")
                 self.is_configured = False
 
     def get_metrics(self) -> List[Any]:
-        """Loads and returns configured RAGAS metric instances."""
-        from ragas.metrics import (
-            context_precision,
-            context_recall,
-            faithfulness,
-            answer_relevancy,
+        """Loads and returns configured RAGAS collections metric instances."""
+        from ragas.metrics.collections import (
+            ContextPrecision,
+            ContextRecall,
+            Faithfulness,
+            AnswerRelevancy,
             FactualCorrectness,
         )
-        factual_correctness = FactualCorrectness()
+        if not self.is_configured or not self._llm_wrapper:
+            from unittest.mock import MagicMock
+            from ragas.llms.base import InstructorBaseRagasLLM
+
+            class _MockInstructorLLM(InstructorBaseRagasLLM):
+                def generate(self, *args, **kwargs):
+                    pass
+                async def agenerate(self, *args, **kwargs):
+                    pass
+
+            llm = _MockInstructorLLM()
+            emb = ITDRRagasEmbeddings()
+            return [
+                ContextPrecision(llm=llm),
+                ContextRecall(llm=llm),
+                Faithfulness(llm=llm),
+                AnswerRelevancy(llm=llm, embeddings=emb),
+                FactualCorrectness(llm=llm),
+            ]
+
+        if self.context_precision is None:
+            self.context_precision = ContextPrecision(llm=self._llm_wrapper)
+            self.context_recall = ContextRecall(llm=self._llm_wrapper)
+            self.faithfulness = Faithfulness(llm=self._llm_wrapper)
+            self.answer_relevancy = AnswerRelevancy(llm=self._llm_wrapper, embeddings=self._embeddings_wrapper)
+            self.factual_correctness = FactualCorrectness(llm=self._llm_wrapper)
+
         return [
-            context_precision,
-            context_recall,
-            faithfulness,
-            answer_relevancy,
-            factual_correctness,
+            self.context_precision,
+            self.context_recall,
+            self.faithfulness,
+            self.answer_relevancy,
+            self.factual_correctness,
         ]
+
+    async def _aevaluate_samples(
+        self,
+        samples_data: List[Dict[str, Any]],
+        skip_generation_metrics_for_fallback: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Asynchronously evaluates samples across collections metrics with:
+        - Explicit empty context handling (0.0 score, no placeholder strings).
+        - Fallback generation exclusion from Faithfulness, Answer Relevancy, and Factual Correctness.
+        - Strict isolation between retrieval and generation aggregates.
+        """
+        import asyncio
+
+        def _to_float(res: Any) -> Optional[float]:
+            if res is None:
+                return None
+            val = getattr(res, "value", res)
+            try:
+                f = float(val)
+                if f == f and not (f == float("inf") or f == float("-inf")):
+                    return round(f, 4)
+            except (ValueError, TypeError):
+                pass
+            return None
+
+        def _clean_mean(vals: List[Any]) -> Optional[float]:
+            clean = [v for v in vals if v is not None]
+            return round(sum(clean) / len(clean), 4) if clean else None
+
+        per_sample = []
+        metrics = self.get_metrics()
+        cp_metric, cr_metric, faith_metric, ar_metric, fc_metric = metrics[:5]
+
+        logger.info(f"Running RAGAS collections evaluation on {len(samples_data)} samples...")
+
+        for idx, s in enumerate(samples_data, start=1):
+            s_id = s.get("sample_id", f"sample-{idx}")
+            raw_contexts = s.get("contexts") or []
+            contexts = [c for c in raw_contexts if c and str(c).strip()]
+            is_fallback = bool(s.get("is_fallback_generation", False))
+
+            raw_resp = s.get("response") or s.get("structured_report") or "Insufficient evidence to generate report."
+            resp = format_report_for_evaluation(raw_resp) if isinstance(raw_resp, dict) else str(raw_resp)
+            ref = s.get("reference") or s.get("reference_answer") or "Authoritative reference answer."
+            q = s.get("question") or "Security advisory query."
+
+            # 1. Retrieval Metrics Evaluation
+            # Requirement 2: Do NOT insert placeholder text. Handle empty contexts explicitly.
+            # Record missing context as a retrieval failure (0.0).
+            c_prec = None
+            c_rec = None
+
+            if not contexts:
+                logger.info(f"[{idx}/{len(samples_data)}] Sample {s_id}: Empty context supplied -> recording retrieval failure (0.0).")
+                c_prec = 0.0
+                c_rec = 0.0
+            else:
+                try:
+                    res_cp = await cp_metric.ascore(user_input=q, reference=ref, retrieved_contexts=contexts)
+                    c_prec = _to_float(res_cp)
+                except Exception as exc:
+                    logger.warning(f"ContextPrecision failed for sample {s_id}: {exc}")
+                    c_prec = None
+
+                try:
+                    res_cr = await cr_metric.ascore(user_input=q, retrieved_contexts=contexts, reference=ref)
+                    c_rec = _to_float(res_cr)
+                except Exception as exc:
+                    logger.warning(f"ContextRecall failed for sample {s_id}: {exc}")
+                    c_rec = None
+
+            # 2. Generation Metrics Evaluation
+            # Requirement 3: Exclude fallback generations from Faithfulness, Answer Relevancy, and Factual Correctness.
+            # Do not use fallback scores as generation-quality scores.
+            faith = None
+            ans_rel = None
+            fact_corr = None
+
+            if is_fallback and skip_generation_metrics_for_fallback:
+                logger.info(f"[{idx}/{len(samples_data)}] Sample {s_id}: Fallback generation -> excluding from generation metrics.")
+                faith = None
+                ans_rel = None
+                fact_corr = None
+            else:
+                # Faithfulness evaluation
+                if not contexts:
+                    # Missing context means response cannot be faithful to retrieved evidence
+                    faith = 0.0
+                else:
+                    try:
+                        res_faith = await faith_metric.ascore(user_input=q, response=resp, retrieved_contexts=contexts)
+                        faith = _to_float(res_faith)
+                    except Exception as exc:
+                        logger.warning(f"Faithfulness failed for sample {s_id}: {exc}")
+                        faith = None
+
+                # Answer Relevancy evaluation
+                try:
+                    res_ar = await ar_metric.ascore(user_input=q, response=resp)
+                    ans_rel = _to_float(res_ar)
+                except Exception as exc:
+                    logger.warning(f"AnswerRelevancy failed for sample {s_id}: {exc}")
+                    ans_rel = None
+
+                # Factual Correctness evaluation
+                try:
+                    res_fc = await fc_metric.ascore(response=resp, reference=ref)
+                    fact_corr = _to_float(res_fc)
+                except Exception as exc:
+                    logger.warning(f"FactualCorrectness failed for sample {s_id}: {exc}")
+                    fact_corr = None
+
+            per_sample.append({
+                "sample_id": s_id,
+                "is_fallback_generation": is_fallback,
+                "context_precision": c_prec,
+                "context_recall": c_rec,
+                "faithfulness": faith,
+                "answer_relevancy": ans_rel,
+                "factual_correctness": fact_corr,
+            })
+
+            # Pacing to respect API rate limits
+            if idx < len(samples_data):
+                await asyncio.sleep(1.0)
+
+        # 3. Aggregate Metrics Computation
+        # Fallback generations are excluded from generation metrics
+        gen_samples = [s for s in per_sample if not s.get("is_fallback_generation")] if skip_generation_metrics_for_fallback else per_sample
+
+        aggregate = {
+            "mean_context_precision": _clean_mean([s["context_precision"] for s in per_sample]),
+            "mean_context_recall": _clean_mean([s["context_recall"] for s in per_sample]),
+            "mean_faithfulness": _clean_mean([s["faithfulness"] for s in gen_samples]) if gen_samples else None,
+            "mean_answer_relevancy": _clean_mean([s["answer_relevancy"] for s in gen_samples]) if gen_samples else None,
+            "mean_factual_correctness": _clean_mean([s["factual_correctness"] for s in gen_samples]) if gen_samples else None,
+            "evaluated_samples_count": len(samples_data),
+            "llm_generation_count": len(gen_samples),
+            "fallback_generation_count": len(samples_data) - len(gen_samples),
+        }
+
+        return {
+            "status": "SUCCESS",
+            "per_sample_scores": per_sample,
+            "aggregate_scores": aggregate,
+        }
 
     def evaluate_samples(
         self,
@@ -280,7 +493,7 @@ class RagasEvaluator:
         skip_generation_metrics_for_fallback: bool = True,
     ) -> Dict[str, Any]:
         """
-        Executes RAGAS evaluation on prepared evaluation samples.
+        Executes RAGAS evaluation on prepared evaluation samples using the collections API.
         """
         if not self.is_configured or not self._llm_wrapper:
             logger.warning("RAGAS evaluator not configured (missing evaluator API key). Skipping RAGAS scores.")
@@ -290,6 +503,7 @@ class RagasEvaluator:
                 "per_sample_scores": [
                     {
                         "sample_id": s.get("sample_id"),
+                        "is_fallback_generation": bool(s.get("is_fallback_generation", False)),
                         "context_precision": None,
                         "context_recall": None,
                         "faithfulness": None,
@@ -304,118 +518,28 @@ class RagasEvaluator:
                     "mean_faithfulness": None,
                     "mean_answer_relevancy": None,
                     "mean_factual_correctness": None,
+                    "evaluated_samples_count": len(samples_data),
+                    "llm_generation_count": 0,
+                    "fallback_generation_count": sum(1 for s in samples_data if s.get("is_fallback_generation")),
                 },
             }
 
         try:
-            from ragas.dataset_schema import SingleTurnSample, EvaluationDataset
-            from ragas.run_config import RunConfig
-            from ragas import evaluate
+            import asyncio
+            loop = None
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
 
-            ragas_samples = []
-            for s in samples_data:
-                contexts = s.get("contexts") or []
-                if not contexts:
-                    contexts = ["No retrieved context supplied to model."]
-
-                raw_resp = s.get("response") or s.get("structured_report") or "Insufficient evidence to generate report."
-                resp = format_report_for_evaluation(raw_resp) if isinstance(raw_resp, dict) else str(raw_resp)
-                ref = s.get("reference") or "Authoritative reference answer."
-                q = s.get("question") or "Security advisory query."
-
-                sample = SingleTurnSample(
-                    user_input=q,
-                    retrieved_contexts=contexts,
-                    response=resp,
-                    reference=ref,
-                )
-                ragas_samples.append(sample)
-
-            metrics = self.get_metrics()
-            run_cfg = RunConfig(max_workers=1, timeout=120, max_retries=10)
-
-            logger.info(f"Running RAGAS evaluation on {len(ragas_samples)} samples across 5 metrics (max_workers=1)...")
-            batch_size = 5
-            dfs = []
-            import pandas as pd
-
-            for batch_start in range(0, len(ragas_samples), batch_size):
-                batch_end = min(batch_start + batch_size, len(ragas_samples))
-                batch_samples = ragas_samples[batch_start:batch_end]
-                batch_dataset = EvaluationDataset(samples=batch_samples)
-                logger.info(f"Evaluating RAGAS batch [{batch_start + 1}..{batch_end}/{len(ragas_samples)}]...")
-                batch_res = evaluate(
-                    dataset=batch_dataset,
-                    metrics=metrics,
-                    llm=self._llm_wrapper,
-                    embeddings=self._embeddings_wrapper,
-                    run_config=run_cfg,
-                )
-                dfs.append(batch_res.to_pandas())
-                if batch_end < len(ragas_samples):
-                    time.sleep(6)  # Paced token bucket replenishment
-
-            df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
-
-            def _extract_metric_val(row, prefix):
-                col = next((c for c in row.index if c == prefix or c.startswith(f"{prefix}(") or c.startswith(f"{prefix}_")), None)
-                if col is not None:
-                    val = row[col]
-                    try:
-                        fval = float(val)
-                        if fval == fval:  # not NaN
-                            return round(fval, 4)
-                    except (ValueError, TypeError):
-                        pass
-                return None
-
-            per_sample = []
-            for idx, s in enumerate(samples_data):
-                is_fallback = bool(s.get("is_fallback_generation", False))
-                row = df.iloc[idx] if idx < len(df) else {}
-
-                c_prec = _extract_metric_val(row, "context_precision")
-                c_rec = _extract_metric_val(row, "context_recall")
-                faith = _extract_metric_val(row, "faithfulness")
-                ans_rel = _extract_metric_val(row, "answer_relevancy")
-                fact_corr = _extract_metric_val(row, "factual_correctness")
-
-                per_sample.append({
-                    "sample_id": s.get("sample_id"),
-                    "is_fallback_generation": is_fallback,
-                    "context_precision": c_prec,
-                    "context_recall": c_rec,
-                    "faithfulness": faith,
-                    "answer_relevancy": ans_rel,
-                    "factual_correctness": fact_corr,
-                })
-
-            def _clean_mean(vals):
-                clean = [v for v in vals if v is not None]
-                return round(sum(clean) / len(clean), 4) if clean else None
-
-            # Calculate aggregates for generation metrics (optionally excluding fallback synthesis)
-            gen_samples = [s for s in per_sample if not s.get("is_fallback_generation")] if skip_generation_metrics_for_fallback else per_sample
-            if not gen_samples:
-                gen_samples = per_sample
-
-            aggregate = {
-                "mean_context_precision": _clean_mean([s["context_precision"] for s in per_sample]),
-                "mean_context_recall": _clean_mean([s["context_recall"] for s in per_sample]),
-                "mean_faithfulness": _clean_mean([s["faithfulness"] for s in gen_samples]),
-                "mean_answer_relevancy": _clean_mean([s["answer_relevancy"] for s in gen_samples]),
-                "mean_factual_correctness": _clean_mean([s["factual_correctness"] for s in gen_samples]),
-                "evaluated_samples_count": len(samples_data),
-                "llm_generation_count": len(gen_samples),
-                "fallback_generation_count": len(samples_data) - len(gen_samples),
-            }
-
-            return {
-                "status": "SUCCESS",
-                "per_sample_scores": per_sample,
-                "aggregate_scores": aggregate,
-            }
-
+            if loop and loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    return executor.submit(
+                        lambda: asyncio.run(self._aevaluate_samples(samples_data, skip_generation_metrics_for_fallback))
+                    ).result()
+            else:
+                return asyncio.run(self._aevaluate_samples(samples_data, skip_generation_metrics_for_fallback))
         except Exception as exc:
             logger.error(f"RAGAS evaluation failed: {exc}", exc_info=True)
             return {
@@ -428,5 +552,8 @@ class RagasEvaluator:
                     "mean_faithfulness": None,
                     "mean_answer_relevancy": None,
                     "mean_factual_correctness": None,
+                    "evaluated_samples_count": len(samples_data),
+                    "llm_generation_count": 0,
+                    "fallback_generation_count": 0,
                 },
             }

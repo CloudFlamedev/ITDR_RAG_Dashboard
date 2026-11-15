@@ -46,7 +46,6 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 jobs:
   production-eval:
@@ -89,7 +88,7 @@ jobs:
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
           LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
-          EVALUATOR_LLM_MODEL: 'llama-3.3-70b-versatile'
+          EVALUATOR_LLM_MODEL: ${{ secrets.EVALUATOR_LLM_MODEL || 'openai/gpt-oss-20b' }}
         run: |
           EXTRA_ARGS=""
           if [ "${{ github.event.inputs.limit }}" != "" ] && [ "${{ github.event.inputs.limit }}" != "0" ]; then
