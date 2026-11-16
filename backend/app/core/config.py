@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     XAI_TIMEOUT_SECONDS: int = Field(default=90, description="Timeout in seconds for LLM calls")
 
     GROQ_API_KEY: Optional[str] = Field(default=None, description="Groq API Key (alternative to XAI_API_KEY)")
+    GROQ_API_KEY_NEW_FOR_TESTING: Optional[str] = Field(default=None, description="Testing Groq API key for CI/evaluation")
     GROQ_API_BASE: str = Field(default="https://api.groq.com/openai/v1", description="Groq API base URL")
     GROQ_MODEL: str = Field(default="openai/gpt-oss-120b", description="Default Groq model")
 
@@ -179,8 +180,8 @@ class Settings(BaseSettings):
 
     @property
     def effective_llm_key(self) -> Optional[str]:
-        """Returns active LLM key, prioritizing GROQ_API_KEY or XAI_API_KEY."""
-        for key in (self.GROQ_API_KEY, self.XAI_API_KEY):
+        """Returns active LLM key, prioritizing GROQ_API_KEY_NEW_FOR_TESTING, GROQ_API_KEY, or XAI_API_KEY."""
+        for key in (self.GROQ_API_KEY_NEW_FOR_TESTING, self.GROQ_API_KEY, self.XAI_API_KEY):
             if key and not key.startswith("replace-") and not key.strip() == "":
                 return key.strip()
         return None

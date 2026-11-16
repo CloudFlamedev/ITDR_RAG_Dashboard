@@ -185,7 +185,12 @@ class RagasEvaluator:
         try:
             from dotenv import dotenv_values
             env_dict = dotenv_values("backend/.env")
-            backend_key = env_dict.get("GROQ_API_KEY") or env_dict.get("XAI_API_KEY") or env_dict.get("OPENAI_API_KEY")
+            backend_key = (
+                env_dict.get("GROQ_API_KEY_NEW_FOR_TESTING")
+                or env_dict.get("GROQ_API_KEY")
+                or env_dict.get("XAI_API_KEY")
+                or env_dict.get("OPENAI_API_KEY")
+            )
             backend_base = env_dict.get("XAI_API_BASE")
             backend_model = env_dict.get("XAI_MODEL")
         except Exception:
@@ -194,6 +199,7 @@ class RagasEvaluator:
         raw_key = (
             api_key
             or os.environ.get("EVALUATOR_LLM_API_KEY")
+            or os.environ.get("GROQ_API_KEY_NEW_FOR_TESTING")
             or os.environ.get("GROQ_API_KEY")
             or os.environ.get("OPENAI_API_KEY")
             or backend_key
@@ -203,7 +209,8 @@ class RagasEvaluator:
         self.api_key = raw_key if (raw_key and not raw_key.startswith("replace-") and len(raw_key.strip()) > 5) else None
 
         self.is_groq = bool(
-            os.environ.get("GROQ_API_KEY")
+            os.environ.get("GROQ_API_KEY_NEW_FOR_TESTING")
+            or os.environ.get("GROQ_API_KEY")
             or (self.api_key and self.api_key.startswith("gsk_"))
             or (base_url and "groq" in base_url.lower())
             or (backend_base and "groq" in backend_base.lower())
@@ -251,7 +258,7 @@ class RagasEvaluator:
                 self.model_name,
                 client=client,
                 mode=mode,
-                max_tokens=2048,
+                max_tokens=600,
                 **extra_kwargs,
             )
             self._embeddings_wrapper = ITDRRagasEmbeddings()
@@ -369,6 +376,27 @@ class RagasEvaluator:
             clean = [v for v in vals if v is not None]
             return round(sum(clean) / len(clean), 4) if clean else None
 
+        async def _safe_score(coro_fn, metric_name: str, sample_id: str, max_retries: int = 5, initial_backoff: float = 6.0) -> Optional[float]:
+            backoff = initial_backoff
+            for attempt in range(max_retries + 1):
+                try:
+                    res = await coro_fn()
+                    return _to_float(res)
+                except Exception as exc:
+                    exc_msg = str(exc).lower()
+                    is_rate_limit = any(k in exc_msg for k in ("429", "rate limit", "tokens per minute", "too large", "tpd", "otpm"))
+                    if is_rate_limit and attempt < max_retries:
+                        logger.warning(
+                            f"[{metric_name}] Rate limit for sample {sample_id} on attempt {attempt + 1}/{max_retries}. "
+                            f"Backing off for {backoff:.1f}s: {exc}"
+                        )
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 1.5, 35.0)
+                    else:
+                        logger.warning(f"[{metric_name}] Failed for sample {sample_id} (attempt {attempt + 1}): {exc}")
+                        return None
+            return None
+
         empty_context_count = 0
         per_sample = []
         metrics = self.get_metrics()
@@ -403,19 +431,19 @@ class RagasEvaluator:
                 c_rec = 0.0
                 retrieval_status = "EMPTY_CONTEXT_ASSIGNED_FAILURE"
             else:
-                try:
-                    res_cp = await cp_metric.ascore(user_input=q, reference=ref, retrieved_contexts=contexts)
-                    c_prec = _to_float(res_cp)
-                except Exception as exc:
-                    logger.warning(f"ContextPrecision failed for sample {s_id}: {exc}")
-                    c_prec = None
+                c_prec = await _safe_score(
+                    lambda: cp_metric.ascore(user_input=q, reference=ref, retrieved_contexts=contexts),
+                    "ContextPrecision",
+                    s_id,
+                )
+                await asyncio.sleep(1.5)
 
-                try:
-                    res_cr = await cr_metric.ascore(user_input=q, retrieved_contexts=contexts, reference=ref)
-                    c_rec = _to_float(res_cr)
-                except Exception as exc:
-                    logger.warning(f"ContextRecall failed for sample {s_id}: {exc}")
-                    c_rec = None
+                c_rec = await _safe_score(
+                    lambda: cr_metric.ascore(user_input=q, retrieved_contexts=contexts, reference=ref),
+                    "ContextRecall",
+                    s_id,
+                )
+                await asyncio.sleep(1.5)
 
             # 2. Generation Metrics Evaluation
             # Exclude fallback generations from Faithfulness, Answer Relevancy, and Factual Correctness.
@@ -434,28 +462,27 @@ class RagasEvaluator:
                     # Missing context means response cannot be faithful to retrieved evidence
                     faith = 0.0
                 else:
-                    try:
-                        res_faith = await faith_metric.ascore(user_input=q, response=resp, retrieved_contexts=contexts)
-                        faith = _to_float(res_faith)
-                    except Exception as exc:
-                        logger.warning(f"Faithfulness failed for sample {s_id}: {exc}")
-                        faith = None
+                    faith = await _safe_score(
+                        lambda: faith_metric.ascore(user_input=q, response=resp, retrieved_contexts=contexts),
+                        "Faithfulness",
+                        s_id,
+                    )
+                    await asyncio.sleep(1.5)
 
                 # Answer Relevancy evaluation
-                try:
-                    res_ar = await ar_metric.ascore(user_input=q, response=resp)
-                    ans_rel = _to_float(res_ar)
-                except Exception as exc:
-                    logger.warning(f"AnswerRelevancy failed for sample {s_id}: {exc}")
-                    ans_rel = None
+                ans_rel = await _safe_score(
+                    lambda: ar_metric.ascore(user_input=q, response=resp),
+                    "AnswerRelevancy",
+                    s_id,
+                )
+                await asyncio.sleep(1.5)
 
                 # Factual Correctness evaluation
-                try:
-                    res_fc = await fc_metric.ascore(response=resp, reference=ref)
-                    fact_corr = _to_float(res_fc)
-                except Exception as exc:
-                    logger.warning(f"FactualCorrectness failed for sample {s_id}: {exc}")
-                    fact_corr = None
+                fact_corr = await _safe_score(
+                    lambda: fc_metric.ascore(response=resp, reference=ref),
+                    "FactualCorrectness",
+                    s_id,
+                )
 
             per_sample.append({
                 "sample_id": s_id,
@@ -472,7 +499,7 @@ class RagasEvaluator:
 
             # Pacing to respect API rate limits
             if idx < len(samples_data):
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(2.0)
 
         # 3. Aggregate Metrics Computation
         retrieved_samples = [s for s in per_sample if not s.get("has_empty_context")]

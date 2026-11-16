@@ -82,8 +82,9 @@ jobs:
         env:
           PYTHONPATH: .
           DATABASE_URL: "sqlite:///:memory:"
-          GROQ_API_KEY: mock-ci-groq-key
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY_NEW_FOR_TESTING || secrets.GROQ_API_KEY || 'mock-ci-groq-key' }}
+          GROQ_API_KEY_NEW_FOR_TESTING: ${{ secrets.GROQ_API_KEY_NEW_FOR_TESTING || '' }}
           XAI_API_KEY: mock-ci-xai-key
-          EVALUATOR_LLM_API_KEY: mock-ci-evaluator-key
+          EVALUATOR_LLM_API_KEY: ${{ secrets.GROQ_API_KEY_NEW_FOR_TESTING || secrets.EVALUATOR_LLM_API_KEY || 'mock-ci-evaluator-key' }}
         run: |
           pytest tests/ -v
