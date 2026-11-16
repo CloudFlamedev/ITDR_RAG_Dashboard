@@ -23,9 +23,16 @@ def db_session():
         db.close()
 
 
+@pytest.fixture
+def db(db_session):
+    """Alias fixture for db_session."""
+    return db_session
+
+
 @pytest.fixture(scope="session")
 def setup_test_users(db_session):
     """Ensure standard test users exist for all 3 RBAC roles and an inactive user."""
+
     admin_role = db_session.query(Role).filter(Role.name == "Admin").first()
     analyst_role = db_session.query(Role).filter(Role.name == "Security Analyst").first()
     viewer_role = db_session.query(Role).filter(Role.name == "Viewer").first()

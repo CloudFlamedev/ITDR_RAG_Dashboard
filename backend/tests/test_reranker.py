@@ -78,9 +78,11 @@ def test_reranker_successful_api_scoring():
         assert meta["rerank_performed"] is True
         # Index 1 was promoted to top position!
         assert reranked[0]["technique_id"] == "T1558"
-        assert reranked[0]["similarity_score"] == 0.942
+        assert reranked[0]["rerank_score"] == 0.942
+        assert reranked[0]["similarity_score"] == 0.65  # Vector similarity preserved independently!
         assert reranked[1]["technique_id"] == "T1566"
-        assert reranked[1]["similarity_score"] == 0.128
+        assert reranked[1]["rerank_score"] == 0.128
+        assert reranked[1]["similarity_score"] == 0.75  # Vector similarity preserved independently!
 
 
 def test_retrieval_service_integrates_reranker():

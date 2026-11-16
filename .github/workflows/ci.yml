@@ -1,0 +1,90 @@
+# ==============================================================================
+# ITDR CONTINUOUS INTEGRATION (CI) WORKFLOW
+#
+# Runs on pull requests and pushes to main and feature branches.
+# Executes the backend test suite, reranker tests, evaluation & monitoring tests,
+# and verifies RAGAS collections API imports and initialization.
+# Does NOT require production database credentials.
+# ==============================================================================
+
+name: ITDR Backend CI
+
+on:
+  pull_request:
+    branches:
+      - main
+      - 'feature/**'
+    paths:
+      - 'backend/**'
+      - '.github/workflows/ci.yml'
+  push:
+    branches:
+      - main
+      - 'feature/**'
+    paths:
+      - 'backend/**'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-ci:
+    name: Backend Tests & RAGAS Smoke Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Set Up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Application and Evaluation Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install -r backend/requirements-eval.txt
+
+      - name: RAGAS Import & Initialization Smoke Test
+        working-directory: backend
+        env:
+          PYTHONPATH: .
+        run: |
+          python -c "
+          from ragas.metrics.collections import (
+              ContextPrecision,
+              ContextRecall,
+              Faithfulness,
+              AnswerRelevancy,
+              FactualCorrectness,
+          )
+          from ragas.embeddings.base import BaseRagasEmbedding
+          from evaluation.ragas_evaluator import RagasEvaluator, ITDRRagasEmbeddings
+
+          evaluator = RagasEvaluator()
+          metrics = evaluator.get_metrics()
+          metric_names = [m.name for m in metrics]
+          print('Successfully imported and initialized RAGAS collections metrics:', metric_names)
+          assert len(metrics) == 5, f'Expected 5 metrics, got {len(metrics)}'
+          for expected in ['context_precision', 'context_recall', 'faithfulness', 'answer_relevancy', 'factual_correctness']:
+              assert expected in metric_names, f'Missing metric: {expected}'
+          print('RAGAS smoke test passed successfully!')
+          "
+
+      - name: Run Backend Evaluation & Unit Tests
+        working-directory: backend
+        env:
+          PYTHONPATH: .
+          DATABASE_URL: "sqlite:///:memory:"
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY_NEW_FOR_TESTING || secrets.GROQ_API_KEY || 'mock-ci-groq-key' }}
+          GROQ_API_KEY_NEW_FOR_TESTING: ${{ secrets.GROQ_API_KEY_NEW_FOR_TESTING || '' }}
+          XAI_API_KEY: mock-ci-xai-key
+          EVALUATOR_LLM_API_KEY: ${{ secrets.GROQ_API_KEY_NEW_FOR_TESTING || secrets.EVALUATOR_LLM_API_KEY || 'mock-ci-evaluator-key' }}
+        run: |
+          pytest tests/ -v

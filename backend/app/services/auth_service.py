@@ -199,7 +199,11 @@ class AuthService:
                 cached_time = cached_data.get("cached_time", 0.0)
                 if (now_mono - cached_time) < _SESSION_CACHE_TTL_SECONDS:
                     expires_at = cached_data["expires_at"]
+                    if expires_at and expires_at.tzinfo is None:
+                        expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
                     last_activity_at = cached_data["last_activity_at"]
+                    if last_activity_at and last_activity_at.tzinfo is None:
+                        last_activity_at = last_activity_at.replace(tzinfo=datetime.timezone.utc)
                     is_active = cached_data["is_active"]
                     revoked_at = cached_data["revoked_at"]
 
@@ -260,7 +264,15 @@ class AuthService:
             return None
 
         # 3. Absolute expiration check
-        if session.expires_at <= now_utc:
+        exp_at = session.expires_at
+        if exp_at and exp_at.tzinfo is None:
+            exp_at = exp_at.replace(tzinfo=datetime.timezone.utc)
+
+        last_act = session.last_activity_at
+        if last_act and last_act.tzinfo is None:
+            last_act = last_act.replace(tzinfo=datetime.timezone.utc)
+
+        if exp_at <= now_utc:
             session.revoked_at = now_utc
             self.db.commit()
             with _session_cache_lock:
@@ -268,7 +280,7 @@ class AuthService:
             return None
 
         # 4. Sliding inactivity timeout check
-        if (now_utc - session.last_activity_at) > inactivity_limit:
+        if (now_utc - last_act) > inactivity_limit:
             session.revoked_at = now_utc
             self.db.commit()
             with _session_cache_lock:
@@ -285,7 +297,7 @@ class AuthService:
             return None
 
         # 6. Slide activity timestamp (only update if > 30s since last write to reduce DB chatter)
-        if (now_utc - session.last_activity_at).total_seconds() > 30:
+        if (now_utc - last_act).total_seconds() > 30:
             session.last_activity_at = now_utc
             self.db.commit()
 
@@ -643,7 +655,10 @@ class AuthService:
             )
 
         now = datetime.datetime.now(datetime.timezone.utc)
-        if verif_record.expires_at <= now:
+        exp_verif = verif_record.expires_at
+        if exp_verif and exp_verif.tzinfo is None:
+            exp_verif = exp_verif.replace(tzinfo=datetime.timezone.utc)
+        if exp_verif <= now:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Verification link has expired. Please request a new verification email.",

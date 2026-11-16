@@ -1,0 +1,117 @@
+# ==============================================================================
+# ITDR PRODUCTION EVALUATION & REGRESSION GATE
+#
+# REQUIRED POSTGRESQL READ-ONLY PERMISSIONS:
+# The GitHub Actions workflow must connect to the production knowledge base using
+# a dedicated read-only database user (configured in secret PROD_READONLY_DATABASE_URL).
+# Execute the following SQL on the production database to configure the read-only role:
+#
+#   -- 1. Create a dedicated read-only role
+#   CREATE ROLE itdr_eval_readonly WITH LOGIN PASSWORD 'YOUR_STRONG_PASSWORD';
+#
+#   -- 2. Grant connection and schema usage
+#   GRANT CONNECT ON DATABASE neondb TO itdr_eval_readonly;
+#   GRANT USAGE ON SCHEMA public TO itdr_eval_readonly;
+#
+#   -- 3. Grant SELECT privileges strictly on existing and future tables
+#   GRANT SELECT ON ALL TABLES IN SCHEMA public TO itdr_eval_readonly;
+#   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO itdr_eval_readonly;
+#
+#   -- 4. Verify no write privileges exist:
+#   -- Under NO circumstances should INSERT, UPDATE, DELETE, TRUNCATE, or DDL
+#   -- privileges be granted to this role.
+# ==============================================================================
+
+name: ITDR Production Evaluation & Regression Gate
+
+on:
+  schedule:
+    # Run weekly every Sunday at 02:00 UTC to control API costs
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Limit number of test cases (0 = evaluate all)'
+        required: false
+        default: '0'
+      skip_ragas:
+        description: 'Skip RAGAS LLM evaluation (deterministic metrics only)'
+        type: boolean
+        required: false
+        default: false
+      tolerance:
+        description: 'Allowed regression drop tolerance fraction (e.g. 0.10 for 10%)'
+        required: false
+        default: '0.10'
+
+permissions:
+  contents: read
+
+jobs:
+  production-eval:
+    name: Evaluate Production Pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Set Up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Verify Read-Only Database Secret
+        run: |
+          if [ -z "${{ secrets.PROD_READONLY_DATABASE_URL }}" ]; then
+            echo "::error::PROD_READONLY_DATABASE_URL secret is not configured. A dedicated read-only database credential is required for production evaluation to prevent write operations."
+            exit 1
+          fi
+
+      - name: Install Application and Evaluation Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install -r backend/requirements-eval.txt
+
+      - name: Execute Golden Evaluation Suite
+        working-directory: backend
+        env:
+          PYTHONPATH: .
+          DATABASE_URL: ${{ secrets.PROD_READONLY_DATABASE_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY_NEW_FOR_TESTING || secrets.GROQ_API_KEY }}
+          GROQ_API_KEY_NEW_FOR_TESTING: ${{ secrets.GROQ_API_KEY_NEW_FOR_TESTING || '' }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+          EVALUATOR_LLM_API_KEY: ${{ secrets.GROQ_API_KEY_NEW_FOR_TESTING || secrets.EVALUATOR_LLM_API_KEY || secrets.GROQ_API_KEY }}
+          EVALUATOR_LLM_MODEL: ${{ secrets.EVALUATOR_LLM_MODEL || 'qwen/qwen3.8-27b' }}
+        run: |
+          EXTRA_ARGS=""
+          if [ "${{ github.event.inputs.limit }}" != "" ] && [ "${{ github.event.inputs.limit }}" != "0" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --limit ${{ github.event.inputs.limit }}"
+          fi
+          if [ "${{ github.event.inputs.skip_ragas }}" == "true" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --skip-ragas"
+          fi
+          TOLERANCE="${{ github.event.inputs.tolerance || '0.10' }}"
+          
+          python -m evaluation.run_evaluation \
+            --dataset evaluation/datasets/itdr_eval.jsonl \
+            --baseline evaluation/baseline.json \
+            --output-dir evaluation/results \
+            --tolerance "$TOLERANCE" \
+            $EXTRA_ARGS
+
+      - name: Upload Evaluation Reports as GitHub Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: itdr-eval-results-${{ github.run_id }}
+          path: backend/evaluation/results/*
+          retention-days: 60

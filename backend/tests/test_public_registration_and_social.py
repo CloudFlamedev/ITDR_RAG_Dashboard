@@ -542,8 +542,11 @@ def test_usage_limits_advisory_length(db):
     assert "exceeds maximum allowed limit" in resp.json()["detail"].lower()
 
 
-def test_daily_analysis_quota_enforcement(db):
+def test_daily_analysis_quota_enforcement(db, monkeypatch):
     """Test that non-admins cannot exceed DAILY_ANALYSIS_LIMIT per 24 hours (HTTP 429)."""
+    from app.api import threats as threats_api
+    monkeypatch.setattr(threats_api.settings, "GLOBAL_DAILY_ANALYSIS_LIMIT", 100000)
+
     auth_svc = AuthService(db)
     uid = uuid.uuid4().hex[:6]
     u = auth_svc.register_public_user(f"Limit User {uid}", f"limit_{uid}@demo.local", "Password123!")
@@ -814,7 +817,7 @@ def test_threat_feed_ownership_isolation(client, db):
     assert r2.status_code == 404
 
     # 3. User 2 listing feeds does not include b1, but does include b_demo
-    list_u2 = client_u2.get("/api/identity/bulletins")
+    list_u2 = client_u2.get("/api/identity/bulletins?limit=100")
     assert list_u2.status_code == 200
     feed_ids_u2 = [b["bulletin_id"] for b in list_u2.json()["bulletins"]]
     assert b1_id not in feed_ids_u2

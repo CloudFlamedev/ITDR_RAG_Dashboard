@@ -2,31 +2,84 @@ import json
 import time
 import logging
 import datetime
-from typing import Dict, Any, List
+import threading
+from typing import Dict, Any, List, Optional, Tuple, Set
+from sqlalchemy.orm import Session
 from langchain_core.messages import SystemMessage, HumanMessage
 from app.ai.state import ThreatAnalysisState
 from app.ai.prompts import SYSTEM_PROMPT, build_user_prompt
 from app.ai.output_schemas import ThreatAnalysisReportSchema
 from app.core.config import get_settings
 from app.core.telemetry import observe, langfuse_client, CallbackHandler, mask_sensitive_data
+from app.db.session import SessionLocal
+from app.models.attack import AttackTechnique
+from app.models.d3fend import D3fendTechnique
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+_authoritative_attack_ids: Optional[Set[str]] = None
+_authoritative_d3fend_ids: Optional[Set[str]] = None
+_taxonomy_lock = threading.Lock()
+
+
+def _get_authoritative_taxonomy_sets() -> Tuple[Set[str], Set[str]]:
+    """Retrieves and caches authoritative ATT&CK and D3FEND technique IDs from database records."""
+    global _authoritative_attack_ids, _authoritative_d3fend_ids
+    if not _authoritative_attack_ids or not _authoritative_d3fend_ids:
+        with _taxonomy_lock:
+            if not _authoritative_attack_ids or not _authoritative_d3fend_ids:
+                db: Session = SessionLocal()
+                try:
+                    att_ids = {r[0] for r in db.query(AttackTechnique.technique_id).all()}
+                    d3f_ids = {r[0] for r in db.query(D3fendTechnique.d3fend_id).all()}
+                    if att_ids:
+                        _authoritative_attack_ids = att_ids
+                    if d3f_ids:
+                        _authoritative_d3fend_ids = d3f_ids
+                except Exception as e:
+                    logger.warning(f"Failed to load authoritative taxonomy from DB: {e}")
+                    return _authoritative_attack_ids or set(), _authoritative_d3fend_ids or set()
+                finally:
+                    db.close()
+    return _authoritative_attack_ids or set(), _authoritative_d3fend_ids or set()
 
 
 def build_grounded_prompt(state: ThreatAnalysisState) -> Dict[str, Any]:
     """
     Node 7: Constructs strictly grounded system and user prompt messages
     packaging retrieved candidates, D3FEND countermeasures, and internal coverage.
+    Instruments exact context preservation for authoritative RAGAS evaluation.
     """
     start = time.perf_counter()
+    candidates = state.get("candidate_techniques", [])
+    d3fend = state.get("d3fend_countermeasures", [])
+    coverage = state.get("coverage_records", [])
+
     user_prompt_str = build_user_prompt(
         advisory_text=state["advisory_text"],
-        candidate_techniques=state.get("candidate_techniques", []),
-        d3fend_countermeasures=state.get("d3fend_countermeasures", []),
-        coverage_records=state.get("coverage_records", []),
+        candidate_techniques=candidates,
+        d3fend_countermeasures=d3fend,
+        coverage_records=coverage,
         extracted_indicators=state.get("extracted_indicators", {}),
     )
+
+    # Instrument exact context items actually formatted and passed to the LLM
+    evaluation_contexts: List[str] = []
+    for c in candidates[:5]:
+        desc = c.get("description", "")
+        evaluation_contexts.append(
+            f"MITRE ATT&CK Technique {c['technique_id']} - {c['name']} (Tactics: {', '.join(c.get('tactics', []))}): {desc[:250]}"
+        )
+    for d in d3fend[:5]:
+        definition = d.get("definition", "")
+        evaluation_contexts.append(
+            f"MITRE D3FEND Countermeasure {d['d3fend_id']} - {d['name']} ({d.get('relationship_type', 'mitigates')}): {definition[:250]}"
+        )
+    for cov in coverage[:8]:
+        evaluation_contexts.append(
+            f"Active Detection Coverage: Technique {cov.get('technique_id')} (Status: {cov.get('status')}, Tools: {', '.join(cov.get('mapped_tools', []))})"
+        )
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -38,12 +91,16 @@ def build_grounded_prompt(state: ThreatAnalysisState) -> Dict[str, Any]:
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "status": "SUCCESS",
         "duration_ms": round((time.perf_counter() - start) * 1000, 2),
-        "metadata": {"prompt_char_length": len(user_prompt_str)},
+        "metadata": {
+            "prompt_char_length": len(user_prompt_str),
+            "evaluation_contexts_count": len(evaluation_contexts),
+        },
         "error": None,
     }
 
     return {
         "prompt_messages": messages,
+        "evaluation_contexts": evaluation_contexts,
         "trace_steps": state["trace_steps"] + [trace_step],
     }
 
@@ -84,9 +141,9 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                             api_key=settings.effective_llm_key,
                             base_url=settings.effective_llm_base,
                             model=test_model,
-                            timeout=6,
+                            timeout=15,
                             temperature=0.1,
-                            max_tokens=1100,
+                            max_tokens=900,
                             max_retries=0,
                         )
                     else:
@@ -95,9 +152,9 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                             xai_api_key=settings.effective_llm_key,
                             xai_api_base=settings.effective_llm_base,
                             model=test_model,
-                            timeout=6,
+                            timeout=15,
                             temperature=0.1,
-                            max_tokens=1100,
+                            max_tokens=900,
                             max_retries=0,
                         )
 
@@ -106,6 +163,19 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                         HumanMessage(content=messages[1]["content"]),
                     ]
                     response = llm.invoke(lc_messages, config={"callbacks": [CallbackHandler()]})
+                    content = (response.content or "").strip()
+                    if not content and hasattr(response, "additional_kwargs"):
+                        content = (
+                            response.additional_kwargs.get("reasoning_content")
+                            or response.additional_kwargs.get("reasoning")
+                            or ""
+                        ).strip()
+
+                    if not content:
+                        logger.warning(f"Model {test_model} returned empty content; trying next candidate model...")
+                        continue
+
+                    raw_response = content
                     used_model = test_model
                     model_name = test_model
                     model_provider = f"Groq LLM ({test_model})" if settings.is_groq else f"xAI Grok ({test_model})"
@@ -118,15 +188,8 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                         continue
                     raise
 
-            if response is None:
-                raise last_err or RuntimeError("No compatible model found on provider API")
-
-            raw_response = (response.content or "").strip()
-            if not raw_response and hasattr(response, "additional_kwargs"):
-                raw_response = (response.additional_kwargs.get("reasoning_content") or "").strip()
-
-            if not raw_response:
-                raise ValueError("LLM returned empty response content")
+            if response is None or not raw_response:
+                raise last_err or RuntimeError("No compatible model returned content on provider API")
 
             # Parse JSON with json-repair for guaranteed structured object recovery
             from json_repair import repair_json
@@ -166,6 +229,12 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
         report_dict = _synthesize_grounded_report(state, note="Generated using authoritative retrieved context (xAI API key not configured in environment)")
         raw_response = json.dumps(report_dict, indent=2)
 
+    is_fallback = "Fallback Synthesis" in model_provider or "Offline Grounded Synthesis" in model_provider
+    if isinstance(report_dict, dict):
+        report_dict["is_fallback_generation"] = is_fallback
+        report_dict["model_provider"] = model_provider
+        report_dict["model_name"] = model_name
+
     trace_step = {
         "step_name": "generate_structured_report",
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -174,6 +243,7 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
         "metadata": {
             "model_provider": model_provider,
             "model_name": model_name,
+            "is_fallback_generation": is_fallback,
             "has_raw_response": bool(raw_response),
         },
         "error": None,
@@ -186,6 +256,7 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
             metadata={
                 "model_provider": model_provider,
                 "model_name": model_name,
+                "is_fallback_generation": is_fallback,
                 "report_id": state.get("report_id"),
                 "duration_ms": round((time.perf_counter() - start) * 1000, 2),
             },
@@ -196,6 +267,7 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
     return {
         "raw_llm_response": raw_response,
         "structured_report": report_dict,
+        "is_fallback_generation": is_fallback,
         "trace_steps": state["trace_steps"] + [trace_step],
     }
 
@@ -322,6 +394,25 @@ def _coerce_report_dict(raw_dict: Any) -> Dict[str, Any]:
     else:
         d["uncertainties"] = []
 
+    # Coerce citations
+    citations = d.get("citations")
+    clean_citations = []
+    if isinstance(citations, list):
+        for cit in citations:
+            if isinstance(cit, dict) and cit.get("source_id"):
+                c = dict(cit)
+                c["source_id"] = str(c["source_id"])
+                c["external_id"] = str(c.get("external_id") or "T0000")
+                c["source_url"] = str(c["source_url"]) if c.get("source_url") else None
+                c["excerpt"] = str(c.get("excerpt") or f"Cited context for {c['source_id']}")
+                try:
+                    c["relevance_score"] = float(c.get("relevance_score", 1.0))
+                except Exception:
+                    c["relevance_score"] = 1.0
+                c["citation_role"] = str(c.get("citation_role") or "Technique Evidence")
+                clean_citations.append(c)
+    d["citations"] = clean_citations
+
     # Coerce extracted_indicators
     if not isinstance(d.get("extracted_indicators"), dict):
         d["extracted_indicators"] = {}
@@ -404,39 +495,139 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
                     })
             final_report["technique_candidates"] = augmented_cands
 
-        # Audit citations: filter out any fabricated citation IDs
-        citations = []
-        for cit in final_report.get("citations", []):
-            citations.append(cit)
+        # Build authoritative valid source lookup map from retrieved evidence
+        valid_source_map: Dict[str, Dict[str, Any]] = {}
+        for cand in state.get("candidate_techniques", []):
+            cand_src = f"att-tech-{cand['technique_id']}"
+            valid_source_map[cand_src] = {
+                "source_id": cand_src,
+                "external_id": cand["technique_id"],
+                "source_url": cand.get("url") or f"https://attack.mitre.org/techniques/{cand['technique_id']}",
+                "excerpt": f"{cand['name']}: {(cand.get('description') or '')[:250]}...",
+                "relevance_score": float(cand.get("similarity_score", 1.0)),
+                "citation_role": "Technique Evidence",
+            }
+            for snip in cand.get("evidence_snippets", []):
+                if snip.get("source_id"):
+                    valid_source_map[snip["source_id"]] = {
+                        "source_id": snip["source_id"],
+                        "external_id": cand["technique_id"],
+                        "source_url": snip.get("url") or cand.get("url"),
+                        "excerpt": snip.get("excerpt", "")[:500],
+                        "relevance_score": float(snip.get("score", 1.0)),
+                        "citation_role": "Technique Evidence",
+                    }
+        for d3f in state.get("d3fend_countermeasures", []):
+            d3f_src = f"d3f-tech-{d3f['d3fend_id']}"
+            valid_source_map[d3f_src] = {
+                "source_id": d3f_src,
+                "external_id": d3f["d3fend_id"],
+                "source_url": d3f.get("url") or f"https://d3fend.mitre.org/technique/{d3f['d3fend_id']}",
+                "excerpt": f"D3FEND Countermeasure: {d3f['name']} - {(d3f.get('definition') or d3f.get('rationale') or '')[:250]}",
+                "relevance_score": 1.0,
+                "citation_role": "Countermeasure Evidence",
+            }
 
-        # If no citations were generated by LLM, populate from top candidate and D3FEND evidence
+        # Audit citations: filter out any fabricated citation IDs and resolve authentic metadata
+        citations = []
+        invalid_citations_count = 0
+        rejected_citations = []
+        raw_citations = final_report.get("citations", [])
+        for cit in raw_citations:
+            s_id = cit.get("source_id")
+            if s_id and s_id in valid_source_map:
+                # Resolve source URLs, titles and excerpts using authentic backend records
+                auth_rec = valid_source_map[s_id]
+                citations.append({
+                    "source_id": s_id,
+                    "external_id": auth_rec["external_id"],
+                    "source_url": auth_rec["source_url"],
+                    "excerpt": auth_rec["excerpt"],
+                    "relevance_score": float(cit.get("relevance_score", auth_rec["relevance_score"])),
+                    "citation_role": cit.get("citation_role", auth_rec["citation_role"]),
+                })
+            else:
+                invalid_citations_count += 1
+                rejected_citations.append(s_id or "unknown-source")
+                logger.warning(f"Rejected fabricated or unknown citation source_id: '{s_id}'")
+
+        # If no valid citations remained from LLM, populate authentic fallback from top evidence
         if not citations:
             if state.get("candidate_techniques"):
                 for cand in state["candidate_techniques"][:3]:
-                    citations.append({
-                        "source_id": f"att-tech-{cand['technique_id']}",
-                        "external_id": cand["technique_id"],
-                        "source_url": cand.get("url"),
-                        "excerpt": f"{cand['name']}: {cand['description'][:200]}...",
-                        "relevance_score": cand.get("similarity_score", 1.0),
-                        "citation_role": "Technique Evidence",
-                    })
+                    cand_src = f"att-tech-{cand['technique_id']}"
+                    if cand_src in valid_source_map:
+                        citations.append(valid_source_map[cand_src])
             if final_report.get("defensive_techniques"):
                 for def_t in final_report["defensive_techniques"][:3]:
-                    citations.append({
-                        "source_id": f"d3f-tech-{def_t['d3fend_id']}",
-                        "external_id": def_t["d3fend_id"],
-                        "source_url": def_t.get("official_url"),
-                        "excerpt": f"D3FEND Countermeasure: {def_t['name']} - {def_t['rationale']}",
-                        "relevance_score": 1.0,
-                        "citation_role": "Countermeasure Evidence",
-                    })
-            final_report["citations"] = citations
+                    d3f_src = f"d3f-tech-{def_t['d3fend_id']}"
+                    if d3f_src in valid_source_map:
+                        citations.append(valid_source_map[d3f_src])
+
+        final_report["citations"] = citations
+
+        # Authoritative Database Taxonomy Validation & Context Support Check
+        auth_attack_ids, auth_d3fend_ids = _get_authoritative_taxonomy_sets()
+        retrieved_exact_attack_ids = {c["technique_id"] for c in state.get("candidate_techniques", [])}
+        retrieved_exact_d3fend_ids = {d["d3fend_id"] for d in state.get("d3fend_countermeasures", [])}
+
+        unsupported_attack_ids = []
+        for cand in final_report.get("technique_candidates", []):
+            tid = cand.get("technique_id")
+            # Authoritative validity check against database records
+            is_valid_taxonomy = (tid in auth_attack_ids) if auth_attack_ids else True
+            # Sub-technique parent rule: A parent ID does NOT prove sub-technique is valid or supported!
+            is_supported = (tid in retrieved_exact_attack_ids)
+
+            cand["is_valid_taxonomy"] = is_valid_taxonomy
+            cand["is_supported"] = bool(is_supported and is_valid_taxonomy)
+
+            if not cand["is_supported"]:
+                unsupported_attack_ids.append(tid)
+                cand["support_warning"] = (
+                    f"Unsupported ID warning: Technique {tid} was generated without supporting evidence in retrieved context."
+                    if is_valid_taxonomy else
+                    f"Unsupported ID warning (Invalid taxonomy): Technique {tid} does not exist in authoritative MITRE ATT&CK taxonomy records."
+                )
+                logger.warning(f"Unsupported/invalid ATT&CK ID detected in generated report: {tid} (valid_taxonomy={is_valid_taxonomy})")
+            else:
+                cand["is_supported"] = True
+
+        unsupported_d3fend_ids = []
+        for def_t in final_report.get("defensive_techniques", []):
+            did = def_t.get("d3fend_id")
+            is_valid_taxonomy = (did in auth_d3fend_ids) if auth_d3fend_ids else True
+            is_supported = (did in retrieved_exact_d3fend_ids)
+
+            def_t["is_valid_taxonomy"] = is_valid_taxonomy
+            def_t["is_supported"] = bool(is_supported and is_valid_taxonomy)
+
+            if not def_t["is_supported"]:
+                unsupported_d3fend_ids.append(did)
+                def_t["support_warning"] = (
+                    f"Unsupported ID warning: D3FEND countermeasure {did} was not present in retrieved context."
+                    if is_valid_taxonomy else
+                    f"Unsupported ID warning (Invalid taxonomy): D3FEND countermeasure {did} does not exist in authoritative MITRE D3FEND taxonomy records."
+                )
+                logger.warning(f"Unsupported/invalid D3FEND ID detected in generated report: {did} (valid_taxonomy={is_valid_taxonomy})")
+            else:
+                def_t["is_supported"] = True
+
+        final_report["unsupported_attack_ids"] = unsupported_attack_ids
+        final_report["unsupported_d3fend_ids"] = unsupported_d3fend_ids
+        final_report["invalid_citations_count"] = invalid_citations_count
+        final_report["model_provider"] = report_dict.get("model_provider")
+        final_report["model_name"] = report_dict.get("model_name")
+        final_report["is_fallback_generation"] = report_dict.get("is_fallback_generation", False)
 
     except Exception as e:
         logger.warning(f"Schema validation error: {e}. Repairing report structure...")
         final_report = _synthesize_grounded_report(state, note="Structure repaired to satisfy Pydantic schema validation.")
         citations = final_report.get("citations", [])
+        unsupported_attack_ids = []
+        unsupported_d3fend_ids = []
+        invalid_citations_count = 0
+        rejected_citations = []
 
     trace_step = {
         "step_name": "validate_report_and_citations",
@@ -445,6 +636,12 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
         "duration_ms": round((time.perf_counter() - start) * 1000, 2),
         "metadata": {
             "validated_citations_count": len(citations),
+            "invalid_citations_count": invalid_citations_count,
+            "rejected_citations": rejected_citations,
+            "unsupported_attack_ids_count": len(unsupported_attack_ids),
+            "unsupported_attack_ids": unsupported_attack_ids,
+            "unsupported_d3fend_ids_count": len(unsupported_d3fend_ids),
+            "unsupported_d3fend_ids": unsupported_d3fend_ids,
             "candidate_count": len(final_report.get("technique_candidates", [])),
         },
         "error": None,
@@ -453,6 +650,10 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
     return {
         "structured_report": final_report,
         "citations": citations,
+        "is_fallback_generation": final_report.get("is_fallback_generation", False),
+        "unsupported_attack_ids": unsupported_attack_ids,
+        "unsupported_d3fend_ids": unsupported_d3fend_ids,
+        "invalid_citations_count": invalid_citations_count,
         "status": "COMPLETED",
         "trace_steps": state["trace_steps"] + [trace_step],
     }
@@ -514,6 +715,9 @@ def handle_insufficient_evidence_or_model_error(state: ThreatAnalysisState) -> D
     return {
         "structured_report": partial_report,
         "citations": [],
+        "unsupported_attack_ids": [],
+        "unsupported_d3fend_ids": [],
+        "invalid_citations_count": 0,
         "status": "INSUFFICIENT_EVIDENCE",
         "trace_steps": state["trace_steps"] + [trace_step],
     }
@@ -604,7 +808,7 @@ def _synthesize_grounded_report(state: ThreatAnalysisState, note: str = "") -> D
         ),
         "severity": severity,
         "severity_rationale": "Assessment reflects high privilege account interaction and potential domain credential exposure.",
-        "incident_overview": state["advisory_text"][:500],
+        "incident_overview": state.get("advisory_text", "")[:500],
         "extracted_indicators": ind,
         "technique_candidates": candidate_items,
         "defensive_techniques": defensive_items,

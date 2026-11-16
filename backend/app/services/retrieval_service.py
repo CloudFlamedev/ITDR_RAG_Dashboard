@@ -32,10 +32,14 @@ class CandidateTechnique:
         url: Optional[str],
         description: str,
         evidence_snippets: List[Dict[str, Any]],
+        vector_score: Optional[float] = None,
+        rerank_score: Optional[float] = None,
     ):
         self.technique_id = technique_id
         self.name = name
-        self.score = score
+        self.vector_score = vector_score if vector_score is not None else score
+        self.rerank_score = rerank_score
+        self.score = self.vector_score  # score is strictly alias for vector_score, never rerank_score
         self.is_exact_match = is_exact_match
         self.tactics = tactics
         self.url = url
@@ -46,7 +50,9 @@ class CandidateTechnique:
         return {
             "technique_id": self.technique_id,
             "name": self.name,
-            "similarity_score": round(self.score, 4),
+            "similarity_score": round(self.vector_score, 4),
+            "vector_score": round(self.vector_score, 4),
+            "rerank_score": round(self.rerank_score, 4) if self.rerank_score is not None else None,
             "is_exact_match": self.is_exact_match,
             "tactics": self.tactics,
             "url": self.url,
@@ -209,6 +215,7 @@ class RetrievalService:
             else:
                 # Update score if higher
                 candidates_by_id[tech_id].score = max(candidates_by_id[tech_id].score, score)
+                candidates_by_id[tech_id].vector_score = max(candidates_by_id[tech_id].vector_score, score)
 
             # Append evidence snippet
             if len(candidates_by_id[tech_id].evidence_snippets) < 3:
@@ -238,9 +245,23 @@ class RetrievalService:
                 explicit_d3fend_ids=explicit_d3fend_ids,
             )
 
-        # 5. Check confidence / sufficiency
-        highest_score = ranked_candidates[0].score if ranked_candidates else 0.0
-        insufficient_evidence = (highest_score < min_similarity_threshold and not explicit_attack_ids)
+        # 5. Check confidence / sufficiency & preserve separate score types
+        highest_vector_score = max((c.vector_score for c in raw_candidates), default=0.0)
+        rerank_scores = [c.rerank_score for c in ranked_candidates if c.rerank_score is not None]
+        highest_rerank_score = max(rerank_scores, default=None) if (rerank_meta.get("rerank_performed") and rerank_scores) else None
+
+        if rerank_meta.get("rerank_performed") and highest_rerank_score is not None:
+            highest_confidence = highest_rerank_score
+        else:
+            highest_confidence = highest_vector_score
+
+        # Calibrated vector similarity score used for cosine-based evidence threshold
+        # (CRITICAL: Never compare Jina cross-encoder relevance scores against cosine similarity threshold)
+        insufficient_evidence = (highest_vector_score < min_similarity_threshold and not explicit_attack_ids)
+
+        # Vector score distribution metrics for drift detection
+        vector_scores = [c.vector_score for c in raw_candidates]
+        avg_vector_score = round(sum(vector_scores) / max(len(vector_scores), 1), 4)
 
         try:
             langfuse_client.update_current_span(
@@ -249,18 +270,23 @@ class RetrievalService:
                     "max_candidates": max_candidates,
                     "include_d3fend": include_d3fend,
                     "min_similarity_threshold": min_similarity_threshold,
+                    "query_type": "explicit_id" if explicit_attack_ids else "natural_language",
                 },
                 output={
                     "explicit_attack_indicators": explicit_attack_ids,
                     "candidate_techniques_count": len(ranked_candidates),
                     "d3fend_countermeasures_count": len(defensive_countermeasures),
+                    "highest_vector_similarity": round(highest_vector_score, 4),
+                    "highest_rerank_score": round(highest_rerank_score, 4) if highest_rerank_score is not None else None,
                     "highest_confidence": round(highest_score, 4),
+                    "avg_vector_score": avg_vector_score,
                     "insufficient_evidence": insufficient_evidence,
                 },
                 metadata={
                     "rerank_applied": rerank_meta.get("rerank_performed", False),
                     "rerank_model": rerank_meta.get("rerank_model"),
                     "rerank_latency_ms": rerank_meta.get("duration_ms", 0.0),
+                    "embedding_model": "BAAI/bge-m3",
                 }
             )
         except Exception as e:
@@ -273,7 +299,10 @@ class RetrievalService:
             "candidates": [c.to_dict() for c in ranked_candidates],
             "defensive_countermeasures": defensive_countermeasures,
             "insufficient_evidence": insufficient_evidence,
-            "highest_confidence": round(highest_score, 4),
+            "highest_confidence": round(highest_confidence, 4),
+            "highest_vector_similarity": round(highest_vector_score, 4),
+            "highest_rerank_score": round(highest_rerank_score, 4) if highest_rerank_score is not None else None,
+            "has_explicit_attack_id": bool(explicit_attack_ids),
             "rerank_applied": rerank_meta.get("rerank_performed", False),
             "rerank_model": rerank_meta.get("rerank_model"),
             "rerank_latency_ms": rerank_meta.get("duration_ms", 0.0),
