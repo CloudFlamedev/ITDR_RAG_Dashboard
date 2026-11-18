@@ -334,11 +334,19 @@ def validate_output_safety(state: ThreatAnalysisState) -> Dict[str, Any]:
             report_dict["is_verified"] = res["is_verified"]
             report_dict["output_security_status"] = res["status"]
 
+        # Determine status adjustment for non-verified outputs
+        new_status = state.get("status", "COMPLETED")
+        if res["status"] in ["SCHEMA_REPAIRED", "FALLBACK_UNVERIFIED"]:
+            new_status = "PARTIAL"
+        elif res["status"] in ["UNGROUNDED", "FLAGGED"]:
+            new_status = "NEEDS_REVIEW"
+
         return {
             "output_security_status": res["status"],
             "output_security_findings": res["findings"],
             "review_reasons": review_reasons,
             "structured_report": report_dict,
+            "status": new_status,
             "trace_steps": state.get("trace_steps", []) + [trace_step],
         }
 
@@ -394,7 +402,7 @@ def handle_security_review(state: ThreatAnalysisState) -> Dict[str, Any]:
     stage = "input_screening"
     reason = "Prompt injection or adversarial instruction detected."
 
-    if state.get("output_security_status") in ["UNSAFE", "UNGROUNDED"]:
+    if state.get("output_security_status") in ["UNSAFE", "UNGROUNDED", "FLAGGED"]:
         stage = "output_validation"
         reason = "Generated report contained unsafe recommendations, secret leakage, or unsupported technique claims."
     elif state.get("retrieved_context_security_status") in ["BLOCKED", "UNTRUSTED_CONTENT_DETECTED"]:

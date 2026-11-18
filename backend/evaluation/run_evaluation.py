@@ -26,6 +26,7 @@ from evaluation.retrieval_metrics import (
     aggregate_retrieval_metrics,
 )
 from evaluation.ragas_evaluator import RagasEvaluator, format_report_for_evaluation
+from evaluation.run_security_evaluation import run_security_evaluation
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("itdr-evaluation-runner")
@@ -370,8 +371,14 @@ def run_evaluation(
     baseline_path: Optional[Path] = None,
     generate_baseline: bool = False,
     tolerance: float = 0.10,
+    include_security: bool = False,
+    security_dataset_path: Optional[Path] = None,
+    retrieval_only: bool = False,
+    ragas_only: bool = False,
 ) -> bool:
     """Main evaluation orchestrator function."""
+    if retrieval_only:
+        skip_ragas = True
     cases = load_golden_dataset(dataset_path)
 
     # Filter sample IDs if requested
@@ -604,7 +611,19 @@ def run_evaluation(
     # 7. Print Summary
     print_summary_table(report_data, regression_check)
 
-    return regression_check["status"] == "PASSED"
+    security_passed = True
+    if include_security:
+        sec_path = security_dataset_path or (Path(__file__).parent / "datasets" / "itdr_security_eval.jsonl")
+        sec_out_dir = (output_dir / "security") if output_dir else (Path(__file__).parent / "results" / "security")
+        logger.info(f"Running AI security guardrail evaluation from {sec_path}...")
+        security_passed = run_security_evaluation(
+            dataset_path=sec_path,
+            output_dir=sec_out_dir,
+            limit=limit,
+            sample_ids=sample_ids,
+        )
+
+    return (regression_check["status"] == "PASSED") and security_passed
 
 
 def main():
@@ -617,6 +636,11 @@ def main():
     parser.add_argument("--baseline", type=str, default=None, help="Path to approved baseline JSON")
     parser.add_argument("--generate-baseline", action="store_true", help="Generate or update baseline.json from this run")
     parser.add_argument("--tolerance", type=float, default=0.10, help="Allowed regression drop fraction (default: 0.10)")
+    parser.add_argument("--security", action="store_true", help="Run AI security guardrail evaluation")
+    parser.add_argument("--security-dataset", type=str, default=None, help="Path to security evaluation JSONL dataset")
+    parser.add_argument("--retrieval-only", action="store_true", help="Run retrieval evaluation only (skips RAGAS and security)")
+    parser.add_argument("--ragas-only", action="store_true", help="Run RAGAS evaluation only")
+    parser.add_argument("--full", action="store_true", help="Run full evaluation (retrieval + RAGAS + security)")
 
     args = parser.parse_args()
 
@@ -627,15 +651,48 @@ def main():
 
     sample_ids = [s.strip() for s in args.sample_ids.split(",") if s.strip()] if args.sample_ids else None
 
+    # Handle security-only mode: --security passed without --full
+    if args.security and not args.full:
+        sec_dataset = Path(args.security_dataset) if args.security_dataset else (Path(__file__).parent / "datasets" / "itdr_security_eval.jsonl")
+        sec_out_dir = output_dir / "security" if output_dir else (Path(__file__).parent / "results" / "security")
+        success = run_security_evaluation(
+            dataset_path=sec_dataset,
+            output_dir=sec_out_dir,
+            limit=args.limit,
+            sample_ids=sample_ids,
+        )
+        sys.exit(0 if success else 1)
+
+    # Full evaluation mode: retrieval + RAGAS + security
+    if args.full:
+        sec_dataset = Path(args.security_dataset) if args.security_dataset else (Path(__file__).parent / "datasets" / "itdr_security_eval.jsonl")
+        success = run_evaluation(
+            dataset_path=dataset_path,
+            limit=args.limit,
+            sample_ids=sample_ids,
+            skip_ragas=args.skip_ragas,
+            output_dir=output_dir,
+            baseline_path=baseline_path,
+            generate_baseline=args.generate_baseline,
+            tolerance=args.tolerance,
+            include_security=True,
+            security_dataset_path=sec_dataset,
+        )
+        sys.exit(0 if success else 1)
+
+    # Standard evaluation: retrieval-only, ragas-only, or default retrieval + ragas
+    skip_ragas = args.skip_ragas or args.retrieval_only
     success = run_evaluation(
         dataset_path=dataset_path,
         limit=args.limit,
         sample_ids=sample_ids,
-        skip_ragas=args.skip_ragas,
+        skip_ragas=skip_ragas,
         output_dir=output_dir,
         baseline_path=baseline_path,
         generate_baseline=args.generate_baseline,
         tolerance=args.tolerance,
+        retrieval_only=args.retrieval_only,
+        ragas_only=args.ragas_only,
     )
 
     sys.exit(0 if success else 1)

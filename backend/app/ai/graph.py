@@ -85,15 +85,18 @@ def route_after_context_screening(state: ThreatAnalysisState) -> str:
 def route_after_output_safety(state: ThreatAnalysisState) -> str:
     """
     Route 5: Guardrail Edge validating generated report safety, prompt leakage, and false claims.
-    In enforce mode, reports with critical safety violations route to handle_security_review.
-    Otherwise, proceeds to persist_report_and_trace.
+    In enforce mode, reports with critical safety violations (UNSAFE) or unsupported claims (UNGROUNDED)
+    divert to handle_security_review.
+    Non-malicious fallback or schema-repaired reports proceed to persistence with PARTIAL status.
     """
-    if settings.guardrails_enforce and state.get("output_security_status") == "UNSAFE":
-        logger.warning(
-            f"Advisory {state.get('report_id')} generated unsafe output. "
-            "Diverting to security review."
-        )
-        return "handle_security_review"
+    if settings.guardrails_enforce:
+        out_status = state.get("output_security_status")
+        if out_status in ["UNSAFE", "UNGROUNDED", "FLAGGED"]:
+            logger.warning(
+                f"Advisory {state.get('report_id')} generated non-verified or unsafe output ({out_status}). "
+                "Diverting to security review."
+            )
+            return "handle_security_review"
     return "persist_report_and_trace"
 
 

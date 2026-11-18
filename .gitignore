@@ -33,4 +33,8 @@ frontend/node_modules/
 # Evaluation run outputs (keep directory with .gitkeep)
 backend/evaluation/results/*.json
 backend/evaluation/results/*.csv
+backend/evaluation/results/**/*.json
+backend/evaluation/results/**/*.csv
 !backend/evaluation/results/.gitkeep
+!backend/evaluation/results/**/.gitkeep
+

@@ -781,7 +781,7 @@ def _synthesize_grounded_report(state: ThreatAnalysisState, note: str = "") -> D
             "source_id": source_id,
             "external_id": tid,
             "source_url": c.get("url"),
-            "excerpt": f"{c['name']}: {c['description'][:220]}...",
+            "excerpt": f"{c['name']}: {(c.get('description') or '')[:220]}...",
             "relevance_score": c.get("similarity_score", 0.8),
             "citation_role": "Technique Evidence",
         })

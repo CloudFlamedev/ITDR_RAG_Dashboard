@@ -179,7 +179,69 @@ if is_sqlite:
                     is_identity_relevant=True,
                     tactics=[tac],
                 )
-                _init_session.add_all([t1078, t1078_004, t1003, t1003_001])
+                t1098 = AttackTechnique(
+                    stix_id="attack-pattern--t1098",
+                    technique_id="T1098",
+                    name="Account Manipulation",
+                    description="Adversaries may manipulate accounts to maintain access.",
+                    url="https://attack.mitre.org/techniques/T1098",
+                    is_subtechnique=False,
+                    is_identity_relevant=True,
+                    tactics=[tac],
+                )
+                t1110 = AttackTechnique(
+                    stix_id="attack-pattern--t1110",
+                    technique_id="T1110",
+                    name="Brute Force",
+                    description="Adversaries may use brute force techniques to gain access.",
+                    url="https://attack.mitre.org/techniques/T1110",
+                    is_subtechnique=False,
+                    is_identity_relevant=True,
+                    tactics=[tac],
+                )
+                t1550 = AttackTechnique(
+                    stix_id="attack-pattern--t1550",
+                    technique_id="T1550",
+                    name="Use Alternate Authentication Material",
+                    description="Adversaries may use alternate authentication material.",
+                    url="https://attack.mitre.org/techniques/T1550",
+                    is_subtechnique=False,
+                    is_identity_relevant=True,
+                    tactics=[tac],
+                )
+                t1550_002 = AttackTechnique(
+                    stix_id="attack-pattern--t1550-002",
+                    technique_id="T1550.002",
+                    name="Pass the Hash",
+                    description="Adversaries may use stolen password hashes.",
+                    url="https://attack.mitre.org/techniques/T1550/002/",
+                    is_subtechnique=True,
+                    parent_technique_id="T1550",
+                    is_identity_relevant=True,
+                    tactics=[tac],
+                )
+                t1558 = AttackTechnique(
+                    stix_id="attack-pattern--t1558",
+                    technique_id="T1558",
+                    name="Steal or Forge Kerberos Tickets",
+                    description="Adversaries may steal or forge Kerberos tickets.",
+                    url="https://attack.mitre.org/techniques/T1558",
+                    is_subtechnique=False,
+                    is_identity_relevant=True,
+                    tactics=[tac],
+                )
+                t1558_003 = AttackTechnique(
+                    stix_id="attack-pattern--t1558-003",
+                    technique_id="T1558.003",
+                    name="Kerberoasting",
+                    description="Adversaries may abuse Kerberos ticket granting service requests.",
+                    url="https://attack.mitre.org/techniques/T1558/003/",
+                    is_subtechnique=True,
+                    parent_technique_id="T1558",
+                    is_identity_relevant=True,
+                    tactics=[tac],
+                )
+                _init_session.add_all([t1078, t1078_004, t1003, t1003_001, t1098, t1110, t1550, t1550_002, t1558, t1558_003])
 
             from app.models.d3fend import D3fendTechnique
             if not _init_session.query(D3fendTechnique).filter(D3fendTechnique.d3fend_id == "D3-MFA").first():
