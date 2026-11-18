@@ -338,7 +338,7 @@ def validate_output_safety(state: ThreatAnalysisState) -> Dict[str, Any]:
         new_status = state.get("status", "COMPLETED")
         if res["status"] in ["SCHEMA_REPAIRED", "FALLBACK_UNVERIFIED"]:
             new_status = "PARTIAL"
-        elif res["status"] in ["UNGROUNDED", "FLAGGED"]:
+        elif settings.guardrails_enforce and res["status"] in ["UNGROUNDED", "UNSAFE", "FLAGGED"]:
             new_status = "NEEDS_REVIEW"
 
         return {

@@ -236,3 +236,25 @@ def mock_deterministic_llm():
         else:
             yield
 
+
+def pytest_configure(config):
+    """Registers custom markers for test categorization."""
+    config.addinivalue_line(
+        "markers", "live_llm: marks tests as requiring live LLM API credentials (skipped by default in CI)"
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """
+    Ensures tests marked with @pytest.mark.live_llm are skipped by default
+    unless -m live_llm was explicitly specified on the pytest command line.
+    """
+    markexpr = config.getoption("-m", default="")
+    if "live_llm" not in markexpr:
+        skip_live = pytest.mark.skip(
+            reason="Live LLM tests skipped by default in automated test runs. Run with: pytest -m live_llm"
+        )
+        for item in items:
+            if "live_llm" in item.keywords:
+                item.add_marker(skip_live)
+

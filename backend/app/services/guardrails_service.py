@@ -116,7 +116,7 @@ DESTRUCTIVE_RECOMMENDATION_PATTERNS = [
     re.compile(r"\b(?:rm\s+-(?:rf|fr|r\s+-f|f\s+-r)\s+\S*|format\s+[a-z]:|del\s+\/[fsq\s]+)", re.IGNORECASE),
     re.compile(r"\b(?:drop\s+database|delete\s+all\s+(?:users|accounts|records|tables)|truncate\s+table)\b", re.IGNORECASE),
     re.compile(r"\b(?:disable\s+all\s+(?:firewalls?|security|antivirus|edr|mfa)|turn\s+off\s+logging)\b", re.IGNORECASE),
-    re.compile(r"\b(?:exfiltrate|send\s+credentials\s+to|upload\s+passwords\s+to)\b", re.IGNORECASE),
+    re.compile(r"\b(?:send\s+credentials\s+to|upload\s+passwords\s+to|exfiltrate\s+(?:data|credentials|passwords|tokens|secrets|files)?\s*to\s+\S+)\b", re.IGNORECASE),
 ]
 
 FALSE_EXECUTION_CLAIM_PATTERNS = [
