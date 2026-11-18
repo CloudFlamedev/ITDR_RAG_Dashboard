@@ -223,20 +223,27 @@ class Settings(BaseSettings):
         """Returns True if the active provider is Groq."""
         key = self.effective_llm_key or ""
         base = self.effective_llm_base or ""
-        return "groq" in base.lower() or key.startswith("gsk_")
+        if (self.GROQ_API_KEY_NEW_FOR_TESTING and key == self.GROQ_API_KEY_NEW_FOR_TESTING.strip()) or \
+           (self.GROQ_API_KEY and key == self.GROQ_API_KEY.strip()):
+            return True
+        return "groq" in base.lower() or key.startswith("gsk_") or "groq" in key.lower()
 
     @property
     def effective_llm_base(self) -> str:
         """Returns API base URL for LLM calls."""
         key = self.effective_llm_key or ""
-        if key.startswith("gsk_") or "groq" in self.XAI_API_BASE.lower():
-            return "https://api.groq.com/openai/v1"
+        if (self.GROQ_API_KEY_NEW_FOR_TESTING and key == self.GROQ_API_KEY_NEW_FOR_TESTING.strip()) or \
+           (self.GROQ_API_KEY and key == self.GROQ_API_KEY.strip()) or \
+           key.startswith("gsk_") or "groq" in key.lower() or "groq" in self.XAI_API_BASE.lower():
+            return self.GROQ_API_BASE or "https://api.groq.com/openai/v1"
         return self.XAI_API_BASE or "https://api.x.ai/v1"
 
     @property
     def effective_llm_model(self) -> str:
         """Returns model name for LLM calls."""
-        return self.XAI_MODEL or self.GROQ_MODEL or "grok-4.7"
+        if self.is_groq:
+            return self.GROQ_MODEL or "openai/gpt-oss-120b"
+        return self.XAI_MODEL or "grok-4.7"
 
     @property
     def is_production(self) -> bool:

@@ -18,6 +18,25 @@ from app.models.d3fend import D3fendTechnique
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# Ensure backwards-compatibility for langchain-xai with BaseChatOpenAI across langchain versions
+try:
+    from pydantic.fields import ModelPrivateAttr
+    try:
+        from langchain_openai.chat_models.base import BaseChatOpenAI
+        if hasattr(BaseChatOpenAI, "__private_attributes__") and "_langsmith_gateway_headers" not in BaseChatOpenAI.__private_attributes__:
+            BaseChatOpenAI.__private_attributes__["_langsmith_gateway_headers"] = ModelPrivateAttr(default=None)
+    except Exception:
+        pass
+
+    try:
+        from langchain_xai import ChatXAI
+        if hasattr(ChatXAI, "__private_attributes__") and "_langsmith_gateway_headers" not in ChatXAI.__private_attributes__:
+            ChatXAI.__private_attributes__["_langsmith_gateway_headers"] = ModelPrivateAttr(default=None)
+    except Exception:
+        pass
+except Exception:
+    pass
+
 _authoritative_attack_ids: Optional[Set[str]] = None
 _authoritative_d3fend_ids: Optional[Set[str]] = None
 _taxonomy_lock = threading.Lock()

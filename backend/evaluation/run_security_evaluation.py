@@ -279,12 +279,26 @@ def run_security_pipeline_for_case(case: Dict[str, Any], live_llm: bool = False)
 
     # Handle LLM response mocking for deterministic execution
     from langchain_openai import ChatOpenAI
+    try:
+        from langchain_xai import ChatXAI
+    except Exception:
+        ChatXAI = None
+
+    def _patch_llm_invoke(mock_val=None, side_eff=None):
+        if side_eff is not None:
+            patches.append(patch.object(ChatOpenAI, "invoke", side_effect=side_eff))
+            if ChatXAI is not None:
+                patches.append(patch.object(ChatXAI, "invoke", side_effect=side_eff))
+        else:
+            patches.append(patch.object(ChatOpenAI, "invoke", return_value=mock_val))
+            if ChatXAI is not None:
+                patches.append(patch.object(ChatXAI, "invoke", return_value=mock_val))
 
     if seeded_output:
         mock_resp = MagicMock()
         mock_resp.content = json.dumps(seeded_output)
         mock_resp.additional_kwargs = {}
-        patches.append(patch.object(ChatOpenAI, "invoke", return_value=mock_resp))
+        _patch_llm_invoke(mock_val=mock_resp)
     elif seeded_schema_error:
         mock_clean_resp = MagicMock()
         mock_clean_resp.content = json.dumps({
@@ -298,11 +312,11 @@ def run_security_pipeline_for_case(case: Dict[str, Any], live_llm: bool = False)
             "citations": [{"source_id": "att-tech-T1078", "external_id": "T1078", "excerpt": "Valid accounts excerpt"}],
         })
         mock_clean_resp.additional_kwargs = {}
-        patches.append(patch.object(ChatOpenAI, "invoke", return_value=mock_clean_resp))
+        _patch_llm_invoke(mock_val=mock_clean_resp)
         patches.append(patch("app.ai.nodes.generation_nodes.ThreatAnalysisReportSchema", side_effect=ValueError("ValidationError: missing required field 'severity'")))
     elif seeded_fallback:
         # Cause LLM call failure in generate_structured_report to trigger authentic offline grounded synthesis
-        patches.append(patch.object(ChatOpenAI, "invoke", side_effect=RuntimeError("Simulated LLM API quota error")))
+        _patch_llm_invoke(side_eff=RuntimeError("Simulated LLM API quota error"))
     elif not live_llm:
         # Grounded verified mock that dynamically inspects retrieved prompt context
         def dynamic_mock_invoke(*args, **kwargs):
@@ -322,7 +336,7 @@ def run_security_pipeline_for_case(case: Dict[str, Any], live_llm: bool = False)
             mock_resp.additional_kwargs = {}
             return mock_resp
 
-        patches.append(patch.object(ChatOpenAI, "invoke", side_effect=dynamic_mock_invoke))
+        _patch_llm_invoke(side_eff=dynamic_mock_invoke)
 
     # Apply all patches and execute workflow
     def _execute_nested(patch_idx):
