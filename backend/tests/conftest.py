@@ -206,12 +206,30 @@ def _generate_grounded_mock_llm_response(*args, **kwargs):
 
 
 @pytest.fixture(autouse=True)
-def mock_deterministic_llm():
+def isolate_environment_state():
+    """
+    Preserves and restores os.environ before and after each test,
+    guaranteeing zero cross-test environment contamination or leakages.
+    """
+    original_env = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(original_env)
+
+
+@pytest.fixture(autouse=True)
+def mock_deterministic_llm(request):
     """
     Autouse fixture that provides deterministic, mocked LLM responses for test runs,
     ensuring tests are independent of external LLM API availability and avoiding API costs/failures.
-    Can be bypassed if TEST_USE_LIVE_LLM=true is explicitly set in environment.
+    Automatically bypassed if test has @pytest.mark.live_llm or TEST_USE_LIVE_LLM=true.
     """
+    if request.node.get_closest_marker("live_llm") is not None:
+        yield
+        return
+
     if os.environ.get("TEST_USE_LIVE_LLM", "").strip().lower() in ("true", "1"):
         yield
         return

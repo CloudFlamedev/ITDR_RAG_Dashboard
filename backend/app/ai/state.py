@@ -68,6 +68,7 @@ class ThreatAnalysisState(TypedDict, total=False):
     trace_steps: List[Dict[str, Any]]
     status: str  # INITIALIZING, PROCESSING, COMPLETED, PARTIAL, INSUFFICIENT_EVIDENCE, NEEDS_REVIEW, BLOCKED, ERROR
     error: Optional[str]
+    token_usage: Optional[Dict[str, int]]
 
     # Safe Evaluation Execution Mode
     evaluation_mode: bool  # When True, skips report persistence and user quota tracking

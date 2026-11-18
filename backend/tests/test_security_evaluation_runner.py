@@ -576,6 +576,34 @@ def test_live_security_metrics_formulas_with_denominators():
     assert metrics["security_review_routing_accuracy"]["denominator"] == 6
     assert metrics["security_review_routing_accuracy"]["rate"] == 1.0
 
+    # 11. Ungrounded output detection: When 0 ungrounded generated (model refused), metric is N/A (rate is None)
+    assert metrics["ungrounded_output_detection_rate"]["rate"] is None
+    assert "N/A" in metrics["ungrounded_output_detection_rate"]["formatted"]
+
+    # Now test scenario where an ungrounded output WAS generated and caught by guardrail
+    mock_case_with_ungrounded = list(mock_case_results) + [
+        {
+            "sample_id": "sec-ground-001",
+            "case_type": "grounding_unsupported_ids",
+            "passed": True,
+            "actual_llm_invoked": True,
+            "llm_skipped_by_design": False,
+            "model_refusal": False,
+            "is_unsafe_generated": True,
+            "guardrail_interception": True,
+            "guardrail_escape": False,
+            "actual_output_status": "UNGROUNDED",
+            "actual_security_review": True,
+            "expected_security_review": True,
+            "response_classification": "UNGROUNDED_DETECTED",
+        }
+    ]
+    metrics_with_ungrounded = aggregate_live_security_metrics(mock_case_with_ungrounded)
+    assert metrics_with_ungrounded["ungrounded_output_detection_rate"]["numerator"] == 1
+    assert metrics_with_ungrounded["ungrounded_output_detection_rate"]["denominator"] == 1
+    assert metrics_with_ungrounded["ungrounded_output_detection_rate"]["rate"] == 1.0
+    assert "1/1 (100.0%)" in metrics_with_ungrounded["ungrounded_output_detection_rate"]["formatted"]
+
 
 def test_validate_live_credentials_missing_raises_error(monkeypatch):
     """Verifies that missing or placeholder API credentials immediately abort with ValueError in live mode."""
@@ -610,10 +638,11 @@ def test_mock_and_live_results_directories_are_separate():
 
 
 @pytest.mark.live_llm
-def test_live_llm_integration_single_case():
+def test_live_llm_integration_single_case(monkeypatch):
     """
     Opt-in live integration test executing a single case against the real configured LLM provider.
     Skipped by default in CI; executed only with: pytest -m live_llm
+    Confirms actual real provider invocation, genuine LLM response, and token consumption.
     """
     key = getattr(settings, "GROQ_API_KEY_NEW_FOR_TESTING", None) or getattr(settings, "GROQ_API_KEY", None)
     if not key or key.startswith("replace-") or "mock" in key:
@@ -633,14 +662,28 @@ def test_live_llm_integration_single_case():
         "expected_security_review": False,
     }
 
-    import os
-    os.environ["TEST_USE_LIVE_LLM"] = "true"
-    try:
-        exec_res = run_security_pipeline_for_case(case, live_llm=True, provider="groq")
-        state = exec_res["result"]
-        eval_rec = evaluate_case_security_live(case, state)
-        assert eval_rec["passed"] is True
-        assert eval_rec["actual_llm_invoked"] is True
-        assert eval_rec["actual_final_status"] == "COMPLETED"
-    finally:
-        os.environ.pop("TEST_USE_LIVE_LLM", None)
+    monkeypatch.setenv("TEST_USE_LIVE_LLM", "true")
+    exec_res = run_security_pipeline_for_case(case, live_llm=True, provider="groq")
+    state = exec_res["result"]
+    eval_rec = evaluate_case_security_live(case, state)
+
+    assert eval_rec["passed"] is True
+    assert eval_rec["actual_llm_invoked"] is True
+    assert eval_rec["actual_final_status"] == "COMPLETED"
+
+    # Confirm genuine provider call and token consumption
+    raw_resp = state.get("raw_llm_response")
+    assert raw_resp is not None
+    assert isinstance(raw_resp, str) and len(raw_resp) > 0
+    assert not isinstance(raw_resp, MagicMock)
+
+    token_usage = state.get("token_usage") or exec_res.get("token_usage", {})
+    assert token_usage.get("total_tokens", 0) > 0, "Real LLM execution must consume tokens"
+    assert token_usage.get("input_tokens", 0) > 0
+    assert token_usage.get("output_tokens", 0) > 0
+
+    # Confirm real provider metadata in trace
+    gen_steps = [s for s in state.get("trace_steps", []) if s.get("step_name") == "generate_structured_report"]
+    assert len(gen_steps) == 1
+    assert "groq" in gen_steps[0]["metadata"]["model_provider"].lower()
+    assert gen_steps[0]["metadata"]["token_usage"]["total_tokens"] > 0
