@@ -86,6 +86,7 @@ INDIRECT_INJECTION_PATTERNS = [
     re.compile(r"\b(?:important|urgent|security\s+override)\s*:\s*(?:ignore|do\s+not\s+report|classify\s+as\s+low|say\s+that\s+no\s+threat)\b", re.IGNORECASE),
     re.compile(r"\bdo\s+not\s+mention\s+this\s+technique\b", re.IGNORECASE),
     re.compile(r"\bdisregard\s+actual\s+findings\s+and\s+output\b", re.IGNORECASE),
+    re.compile(r"\b(?:system\s+instruction|system\s+override)\s*:\s*ignore\b", re.IGNORECASE),
 ]
 
 # ------------------------------------------------------------------------------
@@ -108,6 +109,7 @@ SECRET_PATTERNS = [
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bjina_[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"postgresql(?:\+psycopg)?:\/\/[^\s:]+:[^\s@]+@[^\s\/]+\/[^\s\?]+", re.IGNORECASE),
+    re.compile(r"\b(?:password|passwd|pwd)\s*[:=]\s*[\"']?[A-Za-z0-9!@#$%^&*()_+]{8,}[\"']?", re.IGNORECASE),
 ]
 
 DESTRUCTIVE_RECOMMENDATION_PATTERNS = [
@@ -121,6 +123,35 @@ FALSE_EXECUTION_CLAIM_PATTERNS = [
     re.compile(r"\b(?:i\s+have|we\s+have|the\s+system\s+has)\s+(?:already\s+)?(?:deleted|terminated|isolated|wiped|remediated|blocked\s+all|executed)\b", re.IGNORECASE),
     re.compile(r"\baction\s+(?:already\s+)?(?:completed|executed|taken)\s+by\s+the\s+analyst\s+bot\b", re.IGNORECASE),
 ]
+
+
+def mask_secret_value(val: str) -> str:
+    """Masks secret tokens and sensitive credentials for safe logging and audits."""
+    if not val or not isinstance(val, str):
+        return ""
+    if len(val) <= 8:
+        return "[REDACTED_SECRET]"
+    return val[:4] + "***" + val[-3:]
+
+
+def extract_all_text_fields(data: Any, path: str = "") -> List[Tuple[str, str]]:
+    """
+    Recursively extracts all (field_path, text_value) pairs from nested dicts and lists.
+    Guarantees complete coverage for output safety screening.
+    """
+    results: List[Tuple[str, str]] = []
+    if isinstance(data, str):
+        if data.strip():
+            results.append((path, data))
+    elif isinstance(data, dict):
+        for k, v in data.items():
+            sub_path = f"{path}.{k}" if path else str(k)
+            results.extend(extract_all_text_fields(v, sub_path))
+    elif isinstance(data, (list, tuple)):
+        for idx, item in enumerate(data):
+            sub_path = f"{path}[{idx}]"
+            results.extend(extract_all_text_fields(item, sub_path))
+    return results
 
 
 class GuardrailsService:
@@ -150,6 +181,22 @@ class GuardrailsService:
         """Returns True if the engine is running in active enforcement mode."""
         return self.mode == "enforce"
 
+    def _inspect_text_for_indirect_injection(self, text: str) -> Optional[str]:
+        """
+        Inspects an arbitrary text field for indirect prompt injection or instruction override patterns.
+        Returns a sanitized/truncated match snippet if suspicious, or None if clean.
+        """
+        if not text or not isinstance(text, str):
+            return None
+        combined_patterns = INDIRECT_INJECTION_PATTERNS + INSTRUCTION_OVERRIDE_PATTERNS + DELIMITER_INJECTION_PATTERNS
+        for pat in combined_patterns:
+            m = pat.search(text)
+            if m:
+                matched = m.group(0)
+                # Truncate and mask match for safe audit logging
+                return matched[:40] + ("..." if len(matched) > 40 else "")
+        return None
+
     # ==========================================================================
     # 1. Direct Input Screening
     # ==========================================================================
@@ -178,10 +225,11 @@ class GuardrailsService:
         for pat in INSTRUCTION_OVERRIDE_PATTERNS:
             match = pat.search(raw_text)
             if match:
+                matched_str = match.group(0)
                 findings.append({
                     "category": "instruction_override",
                     "severity": "HIGH",
-                    "match": match.group(0),
+                    "match": matched_str[:40] + ("..." if len(matched_str) > 40 else ""),
                     "confidence": 0.85,
                     "description": "Attempted override of system instructions or operational constraints",
                 })
@@ -191,10 +239,11 @@ class GuardrailsService:
         for pat in JAILBREAK_PATTERNS:
             match = pat.search(raw_text)
             if match:
+                matched_str = match.group(0)
                 findings.append({
                     "category": "jailbreak_attempt",
                     "severity": "CRITICAL",
-                    "match": match.group(0),
+                    "match": matched_str[:40] + ("..." if len(matched_str) > 40 else ""),
                     "confidence": 0.95,
                     "description": "Attempted role override, persona bypass, or jailbreak mode activation",
                 })
@@ -204,10 +253,11 @@ class GuardrailsService:
         for pat in PROMPT_LEAKAGE_PATTERNS:
             match = pat.search(raw_text)
             if match:
+                matched_str = match.group(0)
                 findings.append({
                     "category": "prompt_leakage_attempt",
                     "severity": "HIGH",
-                    "match": match.group(0),
+                    "match": matched_str[:40] + ("..." if len(matched_str) > 40 else ""),
                     "confidence": 0.90,
                     "description": "Attempted exfiltration or disclosure of system prompt instructions",
                 })
@@ -217,10 +267,11 @@ class GuardrailsService:
         for pat in DELIMITER_INJECTION_PATTERNS:
             match = pat.search(raw_text)
             if match:
+                matched_str = match.group(0)
                 findings.append({
                     "category": "delimiter_injection",
                     "severity": "CRITICAL",
-                    "match": match.group(0),
+                    "match": matched_str[:40] + ("..." if len(matched_str) > 40 else ""),
                     "confidence": 0.95,
                     "description": "Artificial conversational turn or system boundary delimiter injection",
                 })
@@ -284,9 +335,15 @@ class GuardrailsService:
         d3fend_countermeasures: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """
-        Inspects retrieved ATT&CK, D3FEND, and CTI feed documents for indirect prompt injection.
-        Identifies suspicious embedded instructions, tracks document IDs, and sanitizes/quarantines
-        untrusted context in enforce mode while preserving clean evidence.
+        Inspects every retrieved text field passed to the LLM:
+        - ATT&CK technique names and descriptions.
+        - Evidence snippets (excerpts, content, titles).
+        - Procedure evidence and usages.
+        - D3FEND definitions, rationales, and descriptions.
+        - Threat-feed content and CTI bulletins.
+
+        Separates original retrieved evidence from trusted evidence to protect LLM synthesis
+        while preserving original evidence for security auditing.
         """
         start_time = time.perf_counter()
         suspicious_document_ids: List[str] = []
@@ -296,84 +353,200 @@ class GuardrailsService:
         trusted_candidates: List[Dict[str, Any]] = []
         trusted_d3fend: List[Dict[str, Any]] = []
 
-        # 1. Inspect ATT&CK candidate techniques and their evidence snippets
+        # 1. Inspect ATT&CK candidate techniques and all nested text structures
         for cand in candidate_techniques:
             tid = cand.get("technique_id", "unknown")
             doc_id = f"att-tech-{tid}"
-            desc = cand.get("description", "")
+            cand_trusted = dict(cand)
             cand_suspicious = False
 
-            # Check description for indirect injection
-            for pat in INDIRECT_INJECTION_PATTERNS + INSTRUCTION_OVERRIDE_PATTERNS:
-                match = pat.search(desc)
-                if match:
-                    cand_suspicious = True
-                    suspicious_document_ids.append(doc_id)
-                    findings.append({
-                        "source_id": doc_id,
-                        "technique_id": tid,
-                        "type": "ATTACK_TECHNIQUE_DESCRIPTION",
-                        "match": match.group(0),
-                        "description": "Indirect injection pattern detected in technique description",
-                    })
-                    break
+            # Check technique name
+            name_match = self._inspect_text_for_indirect_injection(cand.get("name", ""))
+            if name_match:
+                cand_suspicious = True
+                suspicious_document_ids.append(doc_id)
+                findings.append({
+                    "source_id": doc_id,
+                    "technique_id": tid,
+                    "type": "ATTACK_TECHNIQUE_NAME",
+                    "match": name_match,
+                    "description": "Indirect injection detected in technique name",
+                })
 
-            # Check evidence snippets
-            clean_snippets = []
+            # Check primary technique description
+            desc = cand.get("description", "")
+            desc_match = self._inspect_text_for_indirect_injection(desc)
+            if desc_match:
+                cand_suspicious = True
+                suspicious_document_ids.append(doc_id)
+                findings.append({
+                    "source_id": doc_id,
+                    "technique_id": tid,
+                    "type": "ATTACK_TECHNIQUE_DESCRIPTION",
+                    "match": desc_match,
+                    "description": "Indirect injection pattern detected in technique description",
+                })
+
+            # Check evidence snippets (excerpt, content, text, title)
+            clean_snippets: List[Dict[str, Any]] = []
             for snip in cand.get("evidence_snippets", []):
                 snip_id = snip.get("source_id", f"{doc_id}-snippet")
-                excerpt = snip.get("excerpt", "")
-                snip_suspicious = False
-                for pat in INDIRECT_INJECTION_PATTERNS + INSTRUCTION_OVERRIDE_PATTERNS:
-                    match = pat.search(excerpt)
-                    if match:
-                        snip_suspicious = True
+                snip_texts = [
+                    snip.get("excerpt", ""),
+                    snip.get("content", ""),
+                    snip.get("text", ""),
+                    snip.get("snippet_text", ""),
+                    snip.get("title", ""),
+                ]
+                snip_poisoned = False
+                for txt in snip_texts:
+                    m = self._inspect_text_for_indirect_injection(txt)
+                    if m:
+                        snip_poisoned = True
                         cand_suspicious = True
                         suspicious_document_ids.append(snip_id)
                         findings.append({
                             "source_id": snip_id,
                             "technique_id": tid,
                             "type": "RETRIEVED_EVIDENCE_SNIPPET",
-                            "match": match.group(0),
+                            "match": m,
                             "description": "Indirect prompt injection detected in retrieved evidence snippet",
                         })
                         break
 
-                if snip_suspicious and self.is_enforce:
+                if snip_poisoned and self.is_enforce:
                     quarantined_document_ids.append(snip_id)
                 else:
                     clean_snippets.append(snip)
 
-            # In enforce mode, quarantine candidate if primary description is hostile
+            # Check procedure evidence (usage, description, excerpt, text, name)
+            clean_procedures: List[Any] = []
+            raw_procedures = cand.get("procedure_evidence") or cand.get("procedures") or []
+            for idx, proc in enumerate(raw_procedures):
+                proc_id = f"{doc_id}-proc-{idx}"
+                proc_texts: List[str] = []
+                if isinstance(proc, dict):
+                    proc_id = proc.get("source_id") or proc.get("procedure_id") or proc_id
+                    proc_texts = [
+                        proc.get("usage", ""),
+                        proc.get("description", ""),
+                        proc.get("excerpt", ""),
+                        proc.get("text", ""),
+                        proc.get("name", ""),
+                    ]
+                elif isinstance(proc, str):
+                    proc_texts = [proc]
+
+                proc_poisoned = False
+                for txt in proc_texts:
+                    m = self._inspect_text_for_indirect_injection(txt)
+                    if m:
+                        proc_poisoned = True
+                        cand_suspicious = True
+                        suspicious_document_ids.append(proc_id)
+                        findings.append({
+                            "source_id": proc_id,
+                            "technique_id": tid,
+                            "type": "PROCEDURE_EVIDENCE",
+                            "match": m,
+                            "description": "Indirect prompt injection detected in procedure evidence",
+                        })
+                        break
+
+                if proc_poisoned and self.is_enforce:
+                    quarantined_document_ids.append(proc_id)
+                else:
+                    clean_procedures.append(proc)
+
+            # Check threat-feed content / bulletins (content, summary, description, title)
+            clean_threat_feeds: List[Any] = []
+            raw_feeds = cand.get("threat_feed_content") or cand.get("cti_feeds") or cand.get("bulletins") or []
+            for idx, feed in enumerate(raw_feeds):
+                feed_id = f"{doc_id}-feed-{idx}"
+                feed_texts: List[str] = []
+                if isinstance(feed, dict):
+                    feed_id = feed.get("source_id") or feed.get("bulletin_id") or feed_id
+                    feed_texts = [
+                        feed.get("content", ""),
+                        feed.get("summary", ""),
+                        feed.get("description", ""),
+                        feed.get("title", ""),
+                    ]
+                elif isinstance(feed, str):
+                    feed_texts = [feed]
+
+                feed_poisoned = False
+                for txt in feed_texts:
+                    m = self._inspect_text_for_indirect_injection(txt)
+                    if m:
+                        feed_poisoned = True
+                        cand_suspicious = True
+                        suspicious_document_ids.append(feed_id)
+                        findings.append({
+                            "source_id": feed_id,
+                            "technique_id": tid,
+                            "type": "THREAT_FEED_CONTENT",
+                            "match": m,
+                            "description": "Indirect prompt injection detected in threat-feed content",
+                        })
+                        break
+
+                if feed_poisoned and self.is_enforce:
+                    quarantined_document_ids.append(feed_id)
+                else:
+                    clean_threat_feeds.append(feed)
+
+            # In enforce mode, quarantine or sanitize candidate
             if cand_suspicious and self.is_enforce:
-                quarantined_document_ids.append(doc_id)
-                # Keep candidate only if clean snippets remain and description is sanitized
-                if clean_snippets:
-                    cand_copy = dict(cand)
-                    cand_copy["evidence_snippets"] = clean_snippets
-                    cand_copy["description"] = "[Content Sanitized: Untrusted instruction excluded from LLM context]"
-                    cand_copy["guardrail_sanitized"] = True
-                    trusted_candidates.append(cand_copy)
+                # If primary description or name was poisoned
+                if desc_match or name_match:
+                    quarantined_document_ids.append(doc_id)
+                    # Preserve candidate ONLY if clean snippets/procedures remain
+                    if clean_snippets or clean_procedures or clean_threat_feeds:
+                        cand_trusted["description"] = "[Content Sanitized: Untrusted instruction excluded from LLM context]"
+                        cand_trusted["evidence_snippets"] = clean_snippets
+                        if "procedure_evidence" in cand_trusted:
+                            cand_trusted["procedure_evidence"] = clean_procedures
+                        if "threat_feed_content" in cand_trusted:
+                            cand_trusted["threat_feed_content"] = clean_threat_feeds
+                        cand_trusted["guardrail_sanitized"] = True
+                        trusted_candidates.append(cand_trusted)
+                    # Otherwise, entire candidate is quarantined
+                else:
+                    # Description is clean, but some sub-evidence was poisoned and quarantined
+                    cand_trusted["evidence_snippets"] = clean_snippets
+                    if "procedure_evidence" in cand_trusted:
+                        cand_trusted["procedure_evidence"] = clean_procedures
+                    if "threat_feed_content" in cand_trusted:
+                        cand_trusted["threat_feed_content"] = clean_threat_feeds
+                    trusted_candidates.append(cand_trusted)
             else:
+                # Monitor mode or completely clean candidate
                 trusted_candidates.append(cand)
 
         # 2. Inspect D3FEND countermeasures
         for d in d3fend_countermeasures:
             did = d.get("d3fend_id", "unknown")
             doc_id = f"d3f-tech-{did}"
-            definition = d.get("definition") or d.get("rationale") or ""
+            d3f_texts = [
+                d.get("name", ""),
+                d.get("definition", ""),
+                d.get("rationale", ""),
+                d.get("description", ""),
+                d.get("matched_via", ""),
+            ]
             d3f_suspicious = False
 
-            for pat in INDIRECT_INJECTION_PATTERNS + INSTRUCTION_OVERRIDE_PATTERNS:
-                match = pat.search(definition)
-                if match:
+            for txt in d3f_texts:
+                m = self._inspect_text_for_indirect_injection(txt)
+                if m:
                     d3f_suspicious = True
                     suspicious_document_ids.append(doc_id)
                     findings.append({
                         "source_id": doc_id,
                         "d3fend_id": did,
                         "type": "D3FEND_COUNTERMEASURE",
-                        "match": match.group(0),
+                        "match": m,
                         "description": "Indirect prompt injection detected in defensive countermeasure definition",
                     })
                     break
@@ -421,14 +594,26 @@ class GuardrailsService:
     # 3. Output Safety and Trust Validation
     # ==========================================================================
 
-    def validate_output_safety(self, report_dict: Dict[str, Any]) -> Dict[str, Any]:
+    def validate_output_safety(
+        self,
+        report_dict: Dict[str, Any],
+        unsupported_attack_ids: Optional[List[str]] = None,
+        unsupported_d3fend_ids: Optional[List[str]] = None,
+        invalid_citations_count: int = 0,
+        validation_status: Optional[str] = None,
+        is_fallback_generation: bool = False,
+        is_schema_repaired: bool = False,
+    ) -> Dict[str, Any]:
         """
-        Inspects generated threat report for:
+        Inspects all generated report text fields recursively for:
         1. System prompt or internal instruction disclosure / leakage.
         2. Credential or API secret disclosure.
         3. Destructive or dangerous recommendations (e.g. format C:, rm -rf /).
         4. False claims that remediation actions were already executed.
-        5. Adoption of untrusted directives.
+
+        Connects ATT&CK/D3FEND validation results with output safety enforcement:
+        - Unsupported findings must not be presented as verified.
+        - Schema-repaired and fallback-generated reports are explicitly flagged and not verified.
         """
         start_time = time.perf_counter()
         if not report_dict or not isinstance(report_dict, dict):
@@ -442,81 +627,120 @@ class GuardrailsService:
 
         findings: List[Dict[str, Any]] = []
 
-        # Flatten report text for holistic inspection
-        text_corpus = []
-        for field in ["report_title", "executive_summary", "incident_overview", "severity_rationale"]:
-            val = report_dict.get(field)
-            if val:
-                text_corpus.append(str(val))
+        # Recursively inspect every string field in the report structure
+        all_text_fields = extract_all_text_fields(report_dict)
 
-        for rec in report_dict.get("recommended_actions", []):
-            if isinstance(rec, dict):
-                text_corpus.append(str(rec.get("action", "")))
-                text_corpus.append(str(rec.get("rationale", "")))
+        for field_path, text_val in all_text_fields:
+            text_lower = text_val.lower()
 
-        full_output_text = " ".join(text_corpus).lower()
+            # 1. System Prompt Leakage Check
+            for fp in SYSTEM_PROMPT_FINGERPRINTS:
+                if fp in text_lower:
+                    findings.append({
+                        "category": "system_prompt_leakage",
+                        "severity": "CRITICAL",
+                        "field": field_path,
+                        "match": fp,
+                        "confidence": 0.95,
+                        "description": f"Verbatim system prompt instruction text detected in '{field_path}'",
+                    })
+                    break
 
-        # 1. System Prompt Leakage Check
-        for fp in SYSTEM_PROMPT_FINGERPRINTS:
-            if fp in full_output_text:
-                findings.append({
-                    "category": "system_prompt_leakage",
-                    "severity": "CRITICAL",
-                    "match": fp,
-                    "confidence": 0.95,
-                    "description": "Generated report contains verbatim system prompt instruction text",
-                })
-                break
+            # 2. Secret / Credential Leakage Check
+            for pat in SECRET_PATTERNS:
+                m = pat.search(text_val)
+                if m:
+                    masked = mask_secret_value(m.group(0))
+                    findings.append({
+                        "category": "credential_disclosure",
+                        "severity": "CRITICAL",
+                        "field": field_path,
+                        "match": masked,
+                        "confidence": 0.99,
+                        "description": f"Sensitive secret or credential detected in '{field_path}'",
+                    })
+                    break
 
-        # 2. Secret / Credential Leakage Check
-        for pat in SECRET_PATTERNS:
-            match = pat.search(" ".join(text_corpus))
-            if match:
-                findings.append({
-                    "category": "credential_disclosure",
-                    "severity": "CRITICAL",
-                    "match": match.group(0)[:15] + "...",
-                    "confidence": 0.99,
-                    "description": "Sensitive API key or database connection string detected in output",
-                })
-                break
+            # 3. Destructive Recommendations Check
+            for pat in DESTRUCTIVE_RECOMMENDATION_PATTERNS:
+                m = pat.search(text_val)
+                if m:
+                    findings.append({
+                        "category": "destructive_recommendation",
+                        "severity": "CRITICAL",
+                        "field": field_path,
+                        "match": m.group(0),
+                        "confidence": 0.90,
+                        "description": f"Potentially destructive or harmful command detected in '{field_path}'",
+                    })
+                    break
 
-        # 3. Destructive Recommendations Check
-        for rec in report_dict.get("recommended_actions", []):
-            if isinstance(rec, dict):
-                action_text = f"{rec.get('action', '')} {rec.get('rationale', '')}"
-                for pat in DESTRUCTIVE_RECOMMENDATION_PATTERNS:
-                    match = pat.search(action_text)
-                    if match:
-                        findings.append({
-                            "category": "destructive_recommendation",
-                            "severity": "CRITICAL",
-                            "match": match.group(0),
-                            "confidence": 0.90,
-                            "description": "Potentially destructive or harmful recommendation detected",
-                        })
-                        break
+            # 4. False Execution Claims Check
+            for pat in FALSE_EXECUTION_CLAIM_PATTERNS:
+                m = pat.search(text_val)
+                if m:
+                    findings.append({
+                        "category": "false_execution_claim",
+                        "severity": "HIGH",
+                        "field": field_path,
+                        "match": m.group(0),
+                        "confidence": 0.85,
+                        "description": f"False claim that automated enterprise remediation was executed in '{field_path}'",
+                    })
+                    break
 
-        # 4. False Execution Claims Check
-        for pat in FALSE_EXECUTION_CLAIM_PATTERNS:
-            match = pat.search(full_output_text)
-            if match:
-                findings.append({
-                    "category": "false_execution_claim",
-                    "severity": "HIGH",
-                    "match": match.group(0),
-                    "confidence": 0.85,
-                    "description": "Report claims automated actions were already executed on enterprise infrastructure",
-                })
-                break
+        # 5. Connect ATT&CK / D3FEND Validation Results
+        unsupported_att = unsupported_attack_ids or []
+        unsupported_d3f = unsupported_d3fend_ids or []
+        has_unsupported_findings = bool(unsupported_att or unsupported_d3f)
 
+        for tid in unsupported_att:
+            findings.append({
+                "category": "unsupported_attack_technique",
+                "severity": "HIGH",
+                "match": tid,
+                "confidence": 0.85,
+                "description": f"ATT&CK Technique '{tid}' was generated but is unsupported by authoritative retrieved evidence",
+            })
+
+        for did in unsupported_d3f:
+            findings.append({
+                "category": "unsupported_d3fend_countermeasure",
+                "severity": "HIGH",
+                "match": did,
+                "confidence": 0.85,
+                "description": f"D3FEND Countermeasure '{did}' was generated but is unsupported by authoritative retrieved evidence",
+            })
+
+        if invalid_citations_count > 0:
+            findings.append({
+                "category": "invalid_citations",
+                "severity": "MEDIUM",
+                "confidence": 0.70,
+                "description": f"Report contains {invalid_citations_count} ungrounded citation references",
+            })
+
+        # Calculate safety and status
+        critical_findings = [
+            f for f in findings
+            if f["category"] in ["system_prompt_leakage", "credential_disclosure", "destructive_recommendation"]
+        ]
+        has_critical_violation = len(critical_findings) > 0
+        critical_risk_score = max([f["confidence"] for f in critical_findings], default=0.0)
         risk_score = max([f["confidence"] for f in findings], default=0.0)
-        is_unsafe = (risk_score >= self.output_threshold) and self.is_enforce
+        is_unsafe = (has_critical_violation or (critical_risk_score >= self.output_threshold)) and self.is_enforce
 
         if is_unsafe:
             status = "UNSAFE"
+        elif has_unsupported_findings:
+            # Unsupported findings must NOT be presented as verified
+            status = "UNGROUNDED"
+        elif is_schema_repaired:
+            status = "SCHEMA_REPAIRED"
+        elif is_fallback_generation:
+            status = "FALLBACK_UNVERIFIED"
         elif findings:
-            status = "LEAKAGE_DETECTED" if any(f["category"] in ["system_prompt_leakage", "credential_disclosure"] for f in findings) else "FLAGGED"
+            status = "FLAGGED"
         else:
             status = "VERIFIED"
 
@@ -525,8 +749,10 @@ class GuardrailsService:
         return {
             "status": status,
             "risk_score": round(risk_score, 4),
-            "is_safe": not is_unsafe,
+            "is_safe": not is_unsafe and not has_critical_violation,
+            "is_verified": status == "VERIFIED",
             "findings": findings,
+            "has_unsupported_findings": has_unsupported_findings,
             "duration_ms": duration_ms,
         }
 
@@ -541,18 +767,37 @@ class GuardrailsService:
         findings: List[Dict[str, Any]],
         advisory_text: str,
         extracted_indicators: Optional[Dict[str, Any]] = None,
+        quarantined_document_ids: Optional[List[str]] = None,
+        suspicious_document_ids: Optional[List[str]] = None,
         report_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Produces a safe, informative threat brief for advisories or reports
         diverted to security review. Avoids re-executing or repeating hostile instructions.
+        Includes retrieved-context findings and quarantined documents while redacting sensitive tokens.
         """
-        sanitized_findings = [
-            f"{f.get('category', 'security_violation')}: {f.get('description', 'Detected policy violation')}"
-            for f in findings[:5]
-        ]
+        sanitized_findings: List[str] = []
+        for f in findings[:8]:
+            cat = f.get("category", "security_violation")
+            desc = f.get("description", "Detected policy violation")
+            match = f.get("match", "")
+            # Ensure sensitive tokens are not leaked in the audit brief
+            if cat == "credential_disclosure":
+                match = mask_secret_value(match)
+            match_str = f" [{match}]" if match else ""
+            sanitized_findings.append(f"{cat}: {desc}{match_str}")
+
         if not sanitized_findings:
             sanitized_findings = [f"Security review triggered during {stage}: {reason}"]
+
+        quarantine_summary = (
+            f"\nQuarantined Documents: {', '.join(quarantined_document_ids)}"
+            if quarantined_document_ids else ""
+        )
+        suspicious_summary = (
+            f"\nSuspicious Documents: {', '.join(suspicious_document_ids)}"
+            if suspicious_document_ids else ""
+        )
 
         return {
             "report_title": f"Security Review Required: {stage.replace('_', ' ').title()}",
@@ -562,12 +807,13 @@ class GuardrailsService:
                 f"To protect pipeline integrity and prevent prompt manipulation, generation has been safely quarantined."
             ),
             "severity": "High",
-            "severity_rationale": "High-confidence adversarial input or unsafe output pattern detected by guardrails engine.",
+            "severity_rationale": "Adversarial input, poisoned retrieval context, or unsafe output pattern detected by guardrails engine.",
             "incident_overview": (
-                f"Advisory Submission ID: Quarantined ({len(advisory_text)} characters).\n"
+                f"Advisory Submission Length: {len(advisory_text)} characters.\n"
                 f"Triggering Stage: {stage}\n"
                 f"Primary Reason: {reason}\n"
-                f"Detected Flags: {', '.join(sanitized_findings)}"
+                f"Detected Flags:\n- " + "\n- ".join(sanitized_findings) +
+                quarantine_summary + suspicious_summary
             ),
             "extracted_indicators": extracted_indicators or {},
             "technique_candidates": [],
@@ -597,5 +843,7 @@ class GuardrailsService:
                 "stage": stage,
                 "reason": reason,
                 "quarantined": True,
+                "quarantined_document_ids": quarantined_document_ids or [],
+                "suspicious_document_ids": suspicious_document_ids or [],
             },
         }

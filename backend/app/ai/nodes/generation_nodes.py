@@ -613,12 +613,23 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
             else:
                 def_t["is_supported"] = True
 
+        is_fallback = report_dict.get("is_fallback_generation", False)
+        is_schema_repaired = False
+        if unsupported_attack_ids or unsupported_d3fend_ids:
+            validation_status = "UNSUPPORTED_TAXONOMY_DETECTED"
+        elif is_fallback:
+            validation_status = "FALLBACK_SYNTHESIZED"
+        else:
+            validation_status = "VALIDATED"
+
+        final_report["validation_status"] = validation_status
+        final_report["is_schema_repaired"] = False
         final_report["unsupported_attack_ids"] = unsupported_attack_ids
         final_report["unsupported_d3fend_ids"] = unsupported_d3fend_ids
         final_report["invalid_citations_count"] = invalid_citations_count
         final_report["model_provider"] = report_dict.get("model_provider")
         final_report["model_name"] = report_dict.get("model_name")
-        final_report["is_fallback_generation"] = report_dict.get("is_fallback_generation", False)
+        final_report["is_fallback_generation"] = is_fallback
 
     except Exception as e:
         logger.warning(f"Schema validation error: {e}. Repairing report structure...")
@@ -628,6 +639,13 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
         unsupported_d3fend_ids = []
         invalid_citations_count = 0
         rejected_citations = []
+        is_schema_repaired = True
+        is_fallback = True
+        validation_status = "SCHEMA_REPAIRED"
+        final_report["validation_status"] = "SCHEMA_REPAIRED"
+        final_report["is_schema_repaired"] = True
+        final_report["is_fallback_generation"] = True
+        final_report["schema_validation_error"] = str(e)
 
     trace_step = {
         "step_name": "validate_report_and_citations",
@@ -635,6 +653,9 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
         "status": "SUCCESS",
         "duration_ms": round((time.perf_counter() - start) * 1000, 2),
         "metadata": {
+            "validation_status": validation_status,
+            "is_schema_repaired": is_schema_repaired,
+            "is_fallback_generation": is_fallback,
             "validated_citations_count": len(citations),
             "invalid_citations_count": invalid_citations_count,
             "rejected_citations": rejected_citations,
@@ -650,7 +671,9 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
     return {
         "structured_report": final_report,
         "citations": citations,
-        "is_fallback_generation": final_report.get("is_fallback_generation", False),
+        "is_fallback_generation": is_fallback,
+        "is_schema_repaired": is_schema_repaired,
+        "validation_status": validation_status,
         "unsupported_attack_ids": unsupported_attack_ids,
         "unsupported_d3fend_ids": unsupported_d3fend_ids,
         "invalid_citations_count": invalid_citations_count,
