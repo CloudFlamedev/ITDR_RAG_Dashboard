@@ -43,11 +43,32 @@ class ThreatAnalysisState(TypedDict, total=False):
     unsupported_attack_ids: List[str]
     unsupported_d3fend_ids: List[str]
     invalid_citations_count: int
+    validation_status: str  # VALIDATED, SCHEMA_REPAIRED, FALLBACK_SYNTHESIZED, UNSUPPORTED_TAXONOMY_DETECTED
+    is_schema_repaired: bool
+    is_fallback_generation: bool
+
+    # AI Security Guardrails Telemetry & Status
+    input_security_status: str  # CLEAN, SUSPICIOUS, BLOCKED, MONITORED
+    input_security_risk: float  # 0.0 to 1.0
+    input_security_findings: List[Dict[str, Any]]
+    retrieved_context_security_status: str  # CLEAN, SANITIZED, UNTRUSTED_CONTENT_DETECTED, BLOCKED
+    retrieved_context_findings: List[Dict[str, Any]]
+    suspicious_document_ids: List[str]
+    quarantined_document_ids: List[str]
+    raw_retrieved_candidates: List[Dict[str, Any]]  # Preserved original evidence for auditability
+    raw_retrieved_d3fend: List[Dict[str, Any]]        # Preserved original evidence for auditability
+    trusted_candidate_techniques: List[Dict[str, Any]]
+    trusted_d3fend_countermeasures: List[Dict[str, Any]]
+    output_security_status: str  # VERIFIED, UNSAFE, LEAKAGE_DETECTED, UNGROUNDED, SCHEMA_REPAIRED, FALLBACK_UNVERIFIED
+    output_security_findings: List[Dict[str, Any]]
+    review_reasons: List[str]
+    guardrail_metadata: Dict[str, Any]
 
     # Execution Trace & Status
     trace_steps: List[Dict[str, Any]]
-    status: str  # INITIALIZING, PROCESSING, COMPLETED, PARTIAL, INSUFFICIENT_EVIDENCE, ERROR
+    status: str  # INITIALIZING, PROCESSING, COMPLETED, PARTIAL, INSUFFICIENT_EVIDENCE, NEEDS_REVIEW, BLOCKED, ERROR
     error: Optional[str]
+    token_usage: Optional[Dict[str, int]]
 
     # Safe Evaluation Execution Mode
     evaluation_mode: bool  # When True, skips report persistence and user quota tracking

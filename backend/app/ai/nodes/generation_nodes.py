@@ -18,6 +18,25 @@ from app.models.d3fend import D3fendTechnique
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# Ensure backwards-compatibility for langchain-xai with BaseChatOpenAI across langchain versions
+try:
+    from pydantic.fields import ModelPrivateAttr
+    try:
+        from langchain_openai.chat_models.base import BaseChatOpenAI
+        if hasattr(BaseChatOpenAI, "__private_attributes__") and "_langsmith_gateway_headers" not in BaseChatOpenAI.__private_attributes__:
+            BaseChatOpenAI.__private_attributes__["_langsmith_gateway_headers"] = ModelPrivateAttr(default=None)
+    except Exception:
+        pass
+
+    try:
+        from langchain_xai import ChatXAI
+        if hasattr(ChatXAI, "__private_attributes__") and "_langsmith_gateway_headers" not in ChatXAI.__private_attributes__:
+            ChatXAI.__private_attributes__["_langsmith_gateway_headers"] = ModelPrivateAttr(default=None)
+    except Exception:
+        pass
+except Exception:
+    pass
+
 _authoritative_attack_ids: Optional[Set[str]] = None
 _authoritative_d3fend_ids: Optional[Set[str]] = None
 _taxonomy_lock = threading.Lock()
@@ -132,6 +151,7 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
             last_err = None
             response = None
             used_model = settings.effective_llm_model
+            token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
             for test_model in models_to_try:
                 try:
@@ -141,9 +161,9 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                             api_key=settings.effective_llm_key,
                             base_url=settings.effective_llm_base,
                             model=test_model,
-                            timeout=15,
+                            timeout=30,
                             temperature=0.1,
-                            max_tokens=900,
+                            max_tokens=2048,
                             max_retries=0,
                         )
                     else:
@@ -152,9 +172,9 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                             xai_api_key=settings.effective_llm_key,
                             xai_api_base=settings.effective_llm_base,
                             model=test_model,
-                            timeout=15,
+                            timeout=30,
                             temperature=0.1,
-                            max_tokens=900,
+                            max_tokens=2048,
                             max_retries=0,
                         )
 
@@ -179,12 +199,24 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                     used_model = test_model
                     model_name = test_model
                     model_provider = f"Groq LLM ({test_model})" if settings.is_groq else f"xAI Grok ({test_model})"
+                    usage_dict = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage") or {}
+                    token_usage = {
+                        "input_tokens": int(usage_dict.get("input_tokens") or usage_dict.get("prompt_tokens") or 0),
+                        "output_tokens": int(usage_dict.get("output_tokens") or usage_dict.get("completion_tokens") or 0),
+                        "total_tokens": int(usage_dict.get("total_tokens") or 0),
+                    }
+                    if not token_usage["total_tokens"]:
+                        token_usage["total_tokens"] = token_usage["input_tokens"] + token_usage["output_tokens"]
                     break
                 except Exception as exc:
                     last_err = exc
                     exc_msg = str(exc).lower()
                     if any(term in exc_msg for term in ["model_not_found", "decommissioned", "does not exist", "404", "429", "rate_limit", "tokens"]):
-                        logger.warning(f"Model {test_model} unavailable or rate-limited ({exc}); falling back to next candidate model...")
+                        if any(term in exc_msg for term in ["429", "rate_limit", "tokens"]):
+                            logger.warning(f"Model {test_model} rate-limited ({exc}); waiting 4s before trying next candidate model...")
+                            time.sleep(4.0)
+                        else:
+                            logger.warning(f"Model {test_model} unavailable ({exc}); falling back to next candidate model...")
                         continue
                     raise
 
@@ -245,6 +277,7 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
             "model_name": model_name,
             "is_fallback_generation": is_fallback,
             "has_raw_response": bool(raw_response),
+            "token_usage": token_usage,
         },
         "error": None,
     }
@@ -259,6 +292,7 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                 "is_fallback_generation": is_fallback,
                 "report_id": state.get("report_id"),
                 "duration_ms": round((time.perf_counter() - start) * 1000, 2),
+                "token_usage": token_usage,
             },
         )
     except Exception as e:
@@ -268,6 +302,7 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
         "raw_llm_response": raw_response,
         "structured_report": report_dict,
         "is_fallback_generation": is_fallback,
+        "token_usage": token_usage,
         "trace_steps": state["trace_steps"] + [trace_step],
     }
 
@@ -499,7 +534,7 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
         valid_source_map: Dict[str, Dict[str, Any]] = {}
         for cand in state.get("candidate_techniques", []):
             cand_src = f"att-tech-{cand['technique_id']}"
-            valid_source_map[cand_src] = {
+            cand_entry = {
                 "source_id": cand_src,
                 "external_id": cand["technique_id"],
                 "source_url": cand.get("url") or f"https://attack.mitre.org/techniques/{cand['technique_id']}",
@@ -507,8 +542,11 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
                 "relevance_score": float(cand.get("similarity_score", 1.0)),
                 "citation_role": "Technique Evidence",
             }
+            valid_source_map[cand_src] = cand_entry
+            valid_source_map[cand["technique_id"]] = cand_entry
+
             for snip in cand.get("evidence_snippets", []):
-                if snip.get("source_id"):
+                if isinstance(snip, dict) and snip.get("source_id"):
                     valid_source_map[snip["source_id"]] = {
                         "source_id": snip["source_id"],
                         "external_id": cand["technique_id"],
@@ -517,16 +555,45 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
                         "relevance_score": float(snip.get("score", 1.0)),
                         "citation_role": "Technique Evidence",
                     }
+            for proc in (cand.get("procedure_evidence") or cand.get("procedures") or []):
+                if isinstance(proc, dict) and proc.get("source_id"):
+                    valid_source_map[proc["source_id"]] = {
+                        "source_id": proc["source_id"],
+                        "external_id": cand["technique_id"],
+                        "source_url": cand.get("url"),
+                        "excerpt": (proc.get("usage") or proc.get("description") or proc.get("excerpt") or "")[:500],
+                        "relevance_score": 1.0,
+                        "citation_role": "Procedure Evidence",
+                    }
+            for feed in (cand.get("threat_feed_content") or cand.get("cti_feeds") or []):
+                if isinstance(feed, dict) and feed.get("source_id"):
+                    valid_source_map[feed["source_id"]] = {
+                        "source_id": feed["source_id"],
+                        "external_id": cand["technique_id"],
+                        "source_url": cand.get("url"),
+                        "excerpt": (feed.get("content") or feed.get("summary") or "")[:500],
+                        "relevance_score": 1.0,
+                        "citation_role": "Threat Feed Evidence",
+                    }
         for d3f in state.get("d3fend_countermeasures", []):
-            d3f_src = f"d3f-tech-{d3f['d3fend_id']}"
-            valid_source_map[d3f_src] = {
+            did = d3f["d3fend_id"]
+            d3f_src = f"d3f-tech-{did}"
+            d3f_entry = {
                 "source_id": d3f_src,
-                "external_id": d3f["d3fend_id"],
-                "source_url": d3f.get("url") or f"https://d3fend.mitre.org/technique/{d3f['d3fend_id']}",
+                "external_id": did,
+                "source_url": d3f.get("url") or f"https://d3fend.mitre.org/technique/{did}",
                 "excerpt": f"D3FEND Countermeasure: {d3f['name']} - {(d3f.get('definition') or d3f.get('rationale') or '')[:250]}",
                 "relevance_score": 1.0,
                 "citation_role": "Countermeasure Evidence",
             }
+            valid_source_map[d3f_src] = d3f_entry
+            valid_source_map[did] = d3f_entry
+            valid_source_map[f"d3fend-{did}"] = d3f_entry
+            valid_source_map[f"d3f-{did}"] = d3f_entry
+            valid_source_map[d3f_src.lower()] = d3f_entry
+            valid_source_map[did.lower()] = d3f_entry
+            valid_source_map[f"d3fend-{did.lower()}"] = d3f_entry
+            valid_source_map[f"d3f-{did.lower()}"] = d3f_entry
 
         # Audit citations: filter out any fabricated citation IDs and resolve authentic metadata
         citations = []
@@ -534,12 +601,19 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
         rejected_citations = []
         raw_citations = final_report.get("citations", [])
         for cit in raw_citations:
-            s_id = cit.get("source_id")
-            if s_id and s_id in valid_source_map:
+            s_id = str(cit.get("source_id") or "").strip()
+            auth_rec = (
+                valid_source_map.get(s_id)
+                or valid_source_map.get(s_id.lower())
+                or valid_source_map.get(s_id.upper())
+                or valid_source_map.get(s_id.replace("d3fend-", "d3f-tech-"))
+                or valid_source_map.get(s_id.replace("attack-", "att-tech-"))
+                or valid_source_map.get(s_id.replace("att-", "att-tech-"))
+            )
+            if auth_rec:
                 # Resolve source URLs, titles and excerpts using authentic backend records
-                auth_rec = valid_source_map[s_id]
                 citations.append({
-                    "source_id": s_id,
+                    "source_id": auth_rec["source_id"],
                     "external_id": auth_rec["external_id"],
                     "source_url": auth_rec["source_url"],
                     "excerpt": auth_rec["excerpt"],
@@ -613,12 +687,23 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
             else:
                 def_t["is_supported"] = True
 
+        is_fallback = report_dict.get("is_fallback_generation", False)
+        is_schema_repaired = False
+        if unsupported_attack_ids or unsupported_d3fend_ids:
+            validation_status = "UNSUPPORTED_TAXONOMY_DETECTED"
+        elif is_fallback:
+            validation_status = "FALLBACK_SYNTHESIZED"
+        else:
+            validation_status = "VALIDATED"
+
+        final_report["validation_status"] = validation_status
+        final_report["is_schema_repaired"] = False
         final_report["unsupported_attack_ids"] = unsupported_attack_ids
         final_report["unsupported_d3fend_ids"] = unsupported_d3fend_ids
         final_report["invalid_citations_count"] = invalid_citations_count
         final_report["model_provider"] = report_dict.get("model_provider")
         final_report["model_name"] = report_dict.get("model_name")
-        final_report["is_fallback_generation"] = report_dict.get("is_fallback_generation", False)
+        final_report["is_fallback_generation"] = is_fallback
 
     except Exception as e:
         logger.warning(f"Schema validation error: {e}. Repairing report structure...")
@@ -628,6 +713,13 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
         unsupported_d3fend_ids = []
         invalid_citations_count = 0
         rejected_citations = []
+        is_schema_repaired = True
+        is_fallback = True
+        validation_status = "SCHEMA_REPAIRED"
+        final_report["validation_status"] = "SCHEMA_REPAIRED"
+        final_report["is_schema_repaired"] = True
+        final_report["is_fallback_generation"] = True
+        final_report["schema_validation_error"] = str(e)
 
     trace_step = {
         "step_name": "validate_report_and_citations",
@@ -635,6 +727,9 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
         "status": "SUCCESS",
         "duration_ms": round((time.perf_counter() - start) * 1000, 2),
         "metadata": {
+            "validation_status": validation_status,
+            "is_schema_repaired": is_schema_repaired,
+            "is_fallback_generation": is_fallback,
             "validated_citations_count": len(citations),
             "invalid_citations_count": invalid_citations_count,
             "rejected_citations": rejected_citations,
@@ -650,7 +745,9 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
     return {
         "structured_report": final_report,
         "citations": citations,
-        "is_fallback_generation": final_report.get("is_fallback_generation", False),
+        "is_fallback_generation": is_fallback,
+        "is_schema_repaired": is_schema_repaired,
+        "validation_status": validation_status,
         "unsupported_attack_ids": unsupported_attack_ids,
         "unsupported_d3fend_ids": unsupported_d3fend_ids,
         "invalid_citations_count": invalid_citations_count,
@@ -758,7 +855,7 @@ def _synthesize_grounded_report(state: ThreatAnalysisState, note: str = "") -> D
             "source_id": source_id,
             "external_id": tid,
             "source_url": c.get("url"),
-            "excerpt": f"{c['name']}: {c['description'][:220]}...",
+            "excerpt": f"{c['name']}: {(c.get('description') or '')[:220]}...",
             "relevance_score": c.get("similarity_score", 0.8),
             "citation_role": "Technique Evidence",
         })

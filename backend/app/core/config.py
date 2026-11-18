@@ -155,6 +155,38 @@ class Settings(BaseSettings):
     LANGFUSE_HOST: Optional[str] = Field(default=None, description="Langfuse Host URL alias")
     LANGFUSE_ENABLED: bool = Field(default=True, description="Enable Langfuse observability layer")
 
+    # AI Security Guardrails Configuration
+    ITDR_GUARDRAILS_ENABLED: bool = Field(default=True, description="Enable AI security guardrails")
+    ITDR_GUARDRAIL_MODE: str = Field(
+        default="monitor",
+        description="Guardrail operational mode: 'monitor' (detect & log warnings) or 'enforce' (quarantine/block high-risk)"
+    )
+    GUARDRAIL_INPUT_RISK_THRESHOLD: float = Field(
+        default=0.75,
+        description="Confidence threshold above which direct injection triggers security review in enforce mode"
+    )
+    GUARDRAIL_CONTEXT_RISK_THRESHOLD: float = Field(
+        default=0.70,
+        description="Confidence threshold above which retrieved document is quarantined in enforce mode"
+    )
+    GUARDRAIL_OUTPUT_RISK_THRESHOLD: float = Field(
+        default=0.75,
+        description="Confidence threshold above which generated output triggers security review in enforce mode"
+    )
+    GUARDRAIL_CLASSIFIER_PROVIDER: str = Field(
+        default="rule_heuristic",
+        description="Classifier provider: 'rule_heuristic' or custom modular classifier"
+    )
+    GUARDRAIL_CLASSIFIER_TIMEOUT_SECONDS: int = Field(
+        default=5,
+        description="Timeout for guardrail classifier calls"
+    )
+
+    @property
+    def guardrails_enforce(self) -> bool:
+        """Returns True if guardrails are actively in enforce mode."""
+        return self.ITDR_GUARDRAILS_ENABLED and self.ITDR_GUARDRAIL_MODE.strip().lower() == "enforce"
+
     @property
     def cors_origins(self) -> list[str]:
         """Returns parsed list of allowed CORS origins, automatically including FRONTEND_URL."""
@@ -191,20 +223,27 @@ class Settings(BaseSettings):
         """Returns True if the active provider is Groq."""
         key = self.effective_llm_key or ""
         base = self.effective_llm_base or ""
-        return "groq" in base.lower() or key.startswith("gsk_")
+        if (self.GROQ_API_KEY_NEW_FOR_TESTING and key == self.GROQ_API_KEY_NEW_FOR_TESTING.strip()) or \
+           (self.GROQ_API_KEY and key == self.GROQ_API_KEY.strip()):
+            return True
+        return "groq" in base.lower() or key.startswith("gsk_") or "groq" in key.lower()
 
     @property
     def effective_llm_base(self) -> str:
         """Returns API base URL for LLM calls."""
         key = self.effective_llm_key or ""
-        if key.startswith("gsk_") or "groq" in self.XAI_API_BASE.lower():
-            return "https://api.groq.com/openai/v1"
+        if (self.GROQ_API_KEY_NEW_FOR_TESTING and key == self.GROQ_API_KEY_NEW_FOR_TESTING.strip()) or \
+           (self.GROQ_API_KEY and key == self.GROQ_API_KEY.strip()) or \
+           key.startswith("gsk_") or "groq" in key.lower() or "groq" in self.XAI_API_BASE.lower():
+            return self.GROQ_API_BASE or "https://api.groq.com/openai/v1"
         return self.XAI_API_BASE or "https://api.x.ai/v1"
 
     @property
     def effective_llm_model(self) -> str:
         """Returns model name for LLM calls."""
-        return self.XAI_MODEL or self.GROQ_MODEL or "grok-4.7"
+        if self.is_groq:
+            return self.GROQ_MODEL or "openai/gpt-oss-120b"
+        return self.XAI_MODEL or "grok-4.7"
 
     @property
     def is_production(self) -> bool:
