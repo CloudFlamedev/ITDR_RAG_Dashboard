@@ -44,9 +44,23 @@ class ThreatAnalysisState(TypedDict, total=False):
     unsupported_d3fend_ids: List[str]
     invalid_citations_count: int
 
+    # AI Security Guardrails Telemetry & Status
+    input_security_status: str  # CLEAN, SUSPICIOUS, BLOCKED, MONITORED
+    input_security_risk: float  # 0.0 to 1.0
+    input_security_findings: List[Dict[str, Any]]
+    retrieved_context_security_status: str  # CLEAN, SANITIZED, UNTRUSTED_CONTENT_DETECTED, BLOCKED
+    suspicious_document_ids: List[str]
+    quarantined_document_ids: List[str]
+    trusted_candidate_techniques: List[Dict[str, Any]]
+    trusted_d3fend_countermeasures: List[Dict[str, Any]]
+    output_security_status: str  # VERIFIED, UNSAFE, LEAKAGE_DETECTED, UNGROUNDED
+    output_security_findings: List[Dict[str, Any]]
+    review_reasons: List[str]
+    guardrail_metadata: Dict[str, Any]
+
     # Execution Trace & Status
     trace_steps: List[Dict[str, Any]]
-    status: str  # INITIALIZING, PROCESSING, COMPLETED, PARTIAL, INSUFFICIENT_EVIDENCE, ERROR
+    status: str  # INITIALIZING, PROCESSING, COMPLETED, PARTIAL, INSUFFICIENT_EVIDENCE, NEEDS_REVIEW, BLOCKED, ERROR
     error: Optional[str]
 
     # Safe Evaluation Execution Mode

@@ -155,6 +155,38 @@ class Settings(BaseSettings):
     LANGFUSE_HOST: Optional[str] = Field(default=None, description="Langfuse Host URL alias")
     LANGFUSE_ENABLED: bool = Field(default=True, description="Enable Langfuse observability layer")
 
+    # AI Security Guardrails Configuration
+    ITDR_GUARDRAILS_ENABLED: bool = Field(default=True, description="Enable AI security guardrails")
+    ITDR_GUARDRAIL_MODE: str = Field(
+        default="monitor",
+        description="Guardrail operational mode: 'monitor' (detect & log warnings) or 'enforce' (quarantine/block high-risk)"
+    )
+    GUARDRAIL_INPUT_RISK_THRESHOLD: float = Field(
+        default=0.75,
+        description="Confidence threshold above which direct injection triggers security review in enforce mode"
+    )
+    GUARDRAIL_CONTEXT_RISK_THRESHOLD: float = Field(
+        default=0.70,
+        description="Confidence threshold above which retrieved document is quarantined in enforce mode"
+    )
+    GUARDRAIL_OUTPUT_RISK_THRESHOLD: float = Field(
+        default=0.75,
+        description="Confidence threshold above which generated output triggers security review in enforce mode"
+    )
+    GUARDRAIL_CLASSIFIER_PROVIDER: str = Field(
+        default="rule_heuristic",
+        description="Classifier provider: 'rule_heuristic' or custom modular classifier"
+    )
+    GUARDRAIL_CLASSIFIER_TIMEOUT_SECONDS: int = Field(
+        default=5,
+        description="Timeout for guardrail classifier calls"
+    )
+
+    @property
+    def guardrails_enforce(self) -> bool:
+        """Returns True if guardrails are actively in enforce mode."""
+        return self.ITDR_GUARDRAILS_ENABLED and self.ITDR_GUARDRAIL_MODE.strip().lower() == "enforce"
+
     @property
     def cors_origins(self) -> list[str]:
         """Returns parsed list of allowed CORS origins, automatically including FRONTEND_URL."""

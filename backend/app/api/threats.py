@@ -205,6 +205,19 @@ def analyze_threat(
         "status": "INITIALIZING",
         "error": None,
         "evaluation_mode": False,
+        # Security Guardrail fields
+        "input_security_status": "CLEAN",
+        "input_security_risk": 0.0,
+        "input_security_findings": [],
+        "retrieved_context_security_status": "CLEAN",
+        "suspicious_document_ids": [],
+        "quarantined_document_ids": [],
+        "trusted_candidate_techniques": [],
+        "trusted_d3fend_countermeasures": [],
+        "output_security_status": "CLEAN",
+        "output_security_findings": [],
+        "review_reasons": [],
+        "guardrail_metadata": {},
     }
 
     # Extract request session and user identity for Langfuse tracing
