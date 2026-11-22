@@ -17,21 +17,14 @@ def normalize_id(identifier: Optional[str]) -> str:
 def _is_match(candidate_id: str, expected_id: str) -> bool:
     """
     Checks if a candidate technique matches an expected technique.
-    Considers exact match (T1003.001 == T1003.001) or hierarchical subtechnique
-    parent-child match (T1003 matching T1003.001 or vice-versa).
+    Strictly enforces exact identifier matching (case-insensitive, whitespace-trimmed).
+    Parent and sub-technique IDs (e.g., T1003 vs T1003.001) are strictly NOT treated as equivalent.
     """
     c = normalize_id(candidate_id)
     e = normalize_id(expected_id)
     if not c or not e:
         return False
-    if c == e:
-        return True
-    # Subtechnique relationship match (e.g. T1078 matches T1078.004)
-    if "." in c and c.split(".")[0] == e:
-        return True
-    if "." in e and e.split(".")[0] == c:
-        return True
-    return False
+    return c == e
 
 
 def compute_precision_at_k(
@@ -41,15 +34,22 @@ def compute_precision_at_k(
 ) -> float:
     """
     Computes Precision@K:
-    Proportion of top-K retrieved technique IDs that match expected IDs.
+    Precision@K = Relevant results in top K / K.
     
+    Missing results within the top K positions count as non-relevant.
+    If fewer than K results are returned, the denominator remains strictly K.
+
     Edge cases:
-    - If expected_ids is empty (e.g., out-of-scope or insufficient evidence):
+    - If k <= 0: returns 0.0.
+    - If expected_ids is empty:
       - Returns 1.0 if retrieved_ids is also empty (correctly suppressed).
       - Returns 0.0 if any techniques were retrieved when none should be.
     - If retrieved_ids is empty and expected_ids is non-empty:
       - Returns 0.0.
     """
+    if k <= 0:
+        return 0.0
+
     norm_retrieved = [normalize_id(x) for x in retrieved_ids if normalize_id(x)][:k]
     norm_expected = [normalize_id(x) for x in expected_ids if normalize_id(x)]
 
@@ -60,11 +60,15 @@ def compute_precision_at_k(
         return 0.0
 
     matches = 0
+    matched_expected = set()
     for r in norm_retrieved:
-        if any(_is_match(r, e) for e in norm_expected):
-            matches += 1
+        for e in norm_expected:
+            if _is_match(r, e) and e not in matched_expected:
+                matches += 1
+                matched_expected.add(e)
+                break
 
-    return round(matches / len(norm_retrieved), 4)
+    return round(matches / k, 4)
 
 
 def compute_recall_at_k(
@@ -75,6 +79,7 @@ def compute_recall_at_k(
     """
     Computes Recall@K:
     Proportion of expected technique IDs that are retrieved within top-K.
+    Enforces exact identifier matching.
 
     Edge cases:
     - If expected_ids is empty:
@@ -93,9 +98,11 @@ def compute_recall_at_k(
         return 0.0
 
     matches = 0
+    matched_expected = set()
     for e in norm_expected:
-        if any(_is_match(r, e) for r in norm_retrieved):
+        if any(_is_match(r, e) for r in norm_retrieved) and e not in matched_expected:
             matches += 1
+            matched_expected.add(e)
 
     return round(matches / len(norm_expected), 4)
 
@@ -199,6 +206,13 @@ def evaluate_case_retrieval(
     error: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Computes all deterministic retrieval metrics for an individual test case."""
+    is_negative = len(expected_attack_ids) == 0 and len(expected_d3fend_ids) == 0
+    is_empty = len(retrieved_attack_ids) == 0 and len(retrieved_d3fend_ids) == 0
+    has_error = error is not None
+
+    is_false_positive = is_negative and not is_empty and not has_error
+    is_correct_empty = is_negative and is_empty and not has_error
+
     att_prec = compute_precision_at_k(retrieved_attack_ids, expected_attack_ids, k=k)
     att_rec = compute_recall_at_k(retrieved_attack_ids, expected_attack_ids, k=k)
     att_hit = compute_hit_rate_at_k(retrieved_attack_ids, expected_attack_ids, k=k)
@@ -211,11 +225,11 @@ def evaluate_case_retrieval(
     d3f_mrr = compute_mrr(retrieved_d3fend_ids, expected_d3fend_ids, k=k)
     d3f_diff = find_missing_and_unexpected_ids(retrieved_d3fend_ids, expected_d3fend_ids, k=k)
 
-    is_empty = len(retrieved_attack_ids) == 0 and len(retrieved_d3fend_ids) == 0
-    has_error = error is not None
-
     return {
         "k": k,
+        "is_negative": is_negative,
+        "is_false_positive": is_false_positive,
+        "is_correct_empty": is_correct_empty,
         "attack_precision_at_k": att_prec,
         "attack_recall_at_k": att_rec,
         "attack_hit_rate_at_k": att_hit,
@@ -240,13 +254,12 @@ def aggregate_retrieval_metrics(
 ) -> Dict[str, Any]:
     """
     Aggregates retrieval metrics across all test cases.
-    Computes:
-    - Recall@K, Precision@K, Hit Rate@K, MRR (separate ATT&CK and D3FEND)
-    - Empty retrieval rate and retrieval error rate
-    - Latency statistics (mean, p95, min, max)
-    - Segmentations for explicit-ID vs semantic vs negative query categories
+    Separates positive queries from negative queries:
+    - Positive queries calculate: Recall@K, Precision@K, Hit Rate@K, MRR (ATT&CK and D3FEND).
+    - Negative queries calculate: False Positive Rate, Correct Empty Retrieval Rate, Error Rate.
+    Negative queries are strictly excluded from positive retrieval metric averages.
     """
-    def _compute_group_summary(cases: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _compute_positive_group_summary(cases: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not cases:
             return {
                 "count": 0,
@@ -264,6 +277,8 @@ def aggregate_retrieval_metrics(
                 "error_rate": 0.0,
                 "mean_latency_ms": 0.0,
                 "p95_latency_ms": 0.0,
+                "min_latency_ms": 0.0,
+                "max_latency_ms": 0.0,
             }
         n = len(cases)
         latencies = sorted([float(c.get("duration_ms", 0.0)) for c in cases])
@@ -292,27 +307,106 @@ def aggregate_retrieval_metrics(
             "max_latency_ms": round(max(latencies), 2) if latencies else 0.0,
         }
 
-    explicit_cases = [c for c in eval_cases_results if c.get("query_type") == "explicit_id" or c.get("has_explicit_attack_id", False)]
-    semantic_cases = [c for c in eval_cases_results if c.get("query_type") == "semantic" or (not c.get("has_explicit_attack_id", False) and c.get("query_type") != "negative")]
-    negative_cases = [c for c in eval_cases_results if c.get("query_type") == "negative" or (not c.get("expected_attack_ids") and not c.get("has_explicit_attack_id", False))]
-    no_id_cases = [c for c in eval_cases_results if not c.get("has_explicit_attack_id", False)]
+    def _compute_negative_group_summary(cases: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not cases:
+            return {
+                "count": 0,
+                "false_positive_count": 0,
+                "false_positive_rate": 0.0,
+                "correct_empty_count": 0,
+                "correct_empty_retrieval_rate": 0.0,
+                "error_count": 0,
+                "error_rate": 0.0,
+                "mean_latency_ms": 0.0,
+                "p95_latency_ms": 0.0,
+            }
+        n = len(cases)
+        err_count = sum(1 for c in cases if c.get("has_error", False))
+        fp_count = sum(
+            1 for c in cases
+            if not c.get("has_error", False) and (
+                len(c.get("retrieved_attack_ids", [])) > 0
+                or len(c.get("retrieved_d3fend_ids", [])) > 0
+                or not c.get("is_empty_retrieval", True)
+            )
+        )
+        correct_empty = sum(
+            1 for c in cases
+            if not c.get("has_error", False) and c.get("is_empty_retrieval", False)
+        )
+        latencies = sorted([float(c.get("duration_ms", 0.0)) for c in cases])
+        p95_idx = max(0, int(len(latencies) * 0.95) - 1)
+        p95_lat = latencies[p95_idx] if latencies else 0.0
 
-    # Breakdown by case_type
-    case_types = set(c.get("case_type", "unknown") for c in eval_cases_results)
+        return {
+            "count": n,
+            "false_positive_count": fp_count,
+            "false_positive_rate": round(fp_count / n, 4),
+            "correct_empty_count": correct_empty,
+            "correct_empty_retrieval_rate": round(correct_empty / n, 4),
+            "error_count": err_count,
+            "error_rate": round(err_count / n, 4),
+            "mean_latency_ms": round(sum(latencies) / max(len(latencies), 1), 2),
+            "p95_latency_ms": round(p95_lat, 2),
+        }
+
+    def _is_negative(c: Dict[str, Any]) -> bool:
+        if c.get("query_type") == "negative":
+            return True
+        if c.get("is_negative") is True:
+            return True
+        exp_att = c.get("expected_attack_ids")
+        exp_d3f = c.get("expected_d3fend_ids")
+        if (
+            exp_att is not None
+            and exp_d3f is not None
+            and len(exp_att) == 0
+            and len(exp_d3f) == 0
+            and not c.get("has_explicit_attack_id", False)
+        ):
+            return True
+        return False
+
+    negative_cases = [c for c in eval_cases_results if _is_negative(c)]
+    positive_cases = [c for c in eval_cases_results if not _is_negative(c)]
+
+    explicit_cases = [
+        c for c in positive_cases
+        if c.get("query_type") == "explicit_id" or c.get("has_explicit_attack_id", False)
+    ]
+    semantic_cases = [
+        c for c in positive_cases
+        if c.get("query_type") == "semantic" or not c.get("has_explicit_attack_id", False)
+    ]
+    no_id_cases = [
+        c for c in positive_cases
+        if not c.get("has_explicit_attack_id", False)
+    ]
+
+    case_types = set(c.get("case_type", "unknown") for c in positive_cases)
     by_case_type = {}
     for ct in sorted(list(case_types)):
-        ct_cases = [c for c in eval_cases_results if c.get("case_type") == ct]
-        by_case_type[ct] = _compute_group_summary(ct_cases)
+        ct_cases = [c for c in positive_cases if c.get("case_type") == ct]
+        by_case_type[ct] = _compute_positive_group_summary(ct_cases)
 
-    combined_summary = _compute_group_summary(eval_cases_results)
+    positive_summary = _compute_positive_group_summary(positive_cases)
+    negative_summary = _compute_negative_group_summary(negative_cases)
+
+    overall_err_count = sum(1 for c in eval_cases_results if c.get("has_error", False))
+    overall_err_rate = round(overall_err_count / len(eval_cases_results), 4) if eval_cases_results else 0.0
 
     return {
         "total_cases": len(eval_cases_results),
-        "combined": combined_summary,
-        "explicit_id_queries": _compute_group_summary(explicit_cases),
-        "semantic_queries": _compute_group_summary(semantic_cases),
-        "no_id_queries": _compute_group_summary(no_id_cases),
-        "negative_queries": _compute_group_summary(negative_cases),
+        "positive_cases_count": len(positive_cases),
+        "negative_cases_count": len(negative_cases),
+        "overall_error_count": overall_err_count,
+        "overall_error_rate": overall_err_rate,
+        "combined": positive_summary,
+        "positive_queries": positive_summary,
+        "negative_queries": negative_summary,
+        "explicit_id_queries": _compute_positive_group_summary(explicit_cases),
+        "semantic_queries": _compute_positive_group_summary(semantic_cases),
+        "no_id_queries": _compute_positive_group_summary(no_id_cases),
         "by_case_type": by_case_type,
     }
 
@@ -329,32 +423,44 @@ def print_retrieval_summary_table(
     print("\n" + bar)
     print(" ITDR LIVE POSTGRESQL / PGVECTOR RETRIEVAL EVALUATION REPORT")
     print(bar)
-    comb = metrics.get("combined", {})
-    print(f" Total Evaluation Queries : {metrics['total_cases']}")
+    pos = metrics.get("positive_queries") or metrics.get("combined", {})
+    neg = metrics.get("negative_queries", {})
+    total_count = metrics.get("total_cases", len(case_records))
+    pos_count = metrics.get("positive_cases_count", pos.get("count", 0))
+    neg_count = metrics.get("negative_cases_count", neg.get("count", 0))
+    overall_err_rate = metrics.get("overall_error_rate", pos.get("error_rate", 0.0))
+
+    print(f" Total Evaluation Queries : {total_count} (Positive: {pos_count}, Negative: {neg_count})")
     print(f" Top-K Cutoff             : K={k}")
-    print(f" Mean Latency             : {comb.get('mean_latency_ms', 0.0):.2f}ms (P95: {comb.get('p95_latency_ms', 0.0):.2f}ms)")
-    print(f" Empty Retrieval Rate     : {comb.get('empty_retrieval_rate', 0.0) * 100:.1f}% ({comb.get('empty_retrieval_count', 0)}/{metrics['total_cases']})")
-    print(f" Retrieval Error Rate     : {comb.get('error_rate', 0.0) * 100:.1f}% ({comb.get('error_count', 0)}/{metrics['total_cases']})")
+    print(f" Mean Latency (Positive)  : {pos.get('mean_latency_ms', 0.0):.2f}ms (P95: {pos.get('p95_latency_ms', 0.0):.2f}ms)")
+    print(f" Overall Error Rate       : {overall_err_rate * 100:.1f}% ({metrics.get('overall_error_count', 0)}/{total_count})")
     print(sub_bar)
-    print(" RETRIEVAL EFFECTIVENESS METRICS (Top-K)")
+    print(" 1. POSITIVE RETRIEVAL EFFECTIVENESS (Top-K)")
     print(sub_bar)
-    print(f" ATT&CK Technique Recall@{k}      : {comb.get('mean_attack_recall_at_k', 0.0) * 100:.1f}%")
-    print(f" ATT&CK Technique Precision@{k}   : {comb.get('mean_attack_precision_at_k', 0.0) * 100:.1f}%")
-    print(f" ATT&CK Technique Hit Rate@{k}    : {comb.get('mean_attack_hit_rate_at_k', 0.0) * 100:.1f}%")
-    print(f" ATT&CK Mean Reciprocal Rank (MRR): {comb.get('mean_attack_mrr', 0.0):.4f}")
-    print(f" D3FEND Countermeasure Recall@{k} : {comb.get('mean_d3fend_recall_at_k', 0.0) * 100:.1f}%")
-    print(f" D3FEND Precision@{k}             : {comb.get('mean_d3fend_precision_at_k', 0.0) * 100:.1f}%")
-    print(f" D3FEND Hit Rate@{k}              : {comb.get('mean_d3fend_hit_rate_at_k', 0.0) * 100:.1f}%")
-    print(f" D3FEND MRR                       : {comb.get('mean_d3fend_mrr', 0.0):.4f}")
+    print(f" ATT&CK Technique Recall@{k}      : {pos.get('mean_attack_recall_at_k', 0.0) * 100:.1f}%")
+    print(f" ATT&CK Technique Precision@{k}   : {pos.get('mean_attack_precision_at_k', 0.0) * 100:.1f}%")
+    print(f" ATT&CK Technique Hit Rate@{k}    : {pos.get('mean_attack_hit_rate_at_k', 0.0) * 100:.1f}%")
+    print(f" ATT&CK Mean Reciprocal Rank (MRR): {pos.get('mean_attack_mrr', 0.0):.4f}")
+    print(f" D3FEND Countermeasure Recall@{k} : {pos.get('mean_d3fend_recall_at_k', 0.0) * 100:.1f}%")
+    print(f" D3FEND Precision@{k}             : {pos.get('mean_d3fend_precision_at_k', 0.0) * 100:.1f}%")
+    print(f" D3FEND Hit Rate@{k}              : {pos.get('mean_d3fend_hit_rate_at_k', 0.0) * 100:.1f}%")
+    print(f" D3FEND MRR                       : {pos.get('mean_d3fend_mrr', 0.0):.4f}")
+    if neg_count > 0:
+        print(sub_bar)
+        print(" 2. NEGATIVE QUERY RETRIEVAL PERFORMANCE (Hallucination Suppression)")
+        print(sub_bar)
+        print(f" Negative Query Count             : {neg_count}")
+        print(f" Correct Empty Retrieval Rate     : {neg.get('correct_empty_retrieval_rate', 0.0) * 100:.1f}% ({neg.get('correct_empty_count', 0)}/{neg_count}) [Desired: 100%]")
+        print(f" False Positive Rate (FPR)        : {neg.get('false_positive_rate', 0.0) * 100:.1f}% ({neg.get('false_positive_count', 0)}/{neg_count}) [Must be 0.0%]")
+        print(f" Negative Retrieval Error Rate    : {neg.get('error_rate', 0.0) * 100:.1f}% ({neg.get('error_count', 0)}/{neg_count})")
     print(sub_bar)
-    print(" QUERY CATEGORY SEGMENTATION")
+    print(" 3. QUERY CATEGORY SEGMENTATION")
     print(sub_bar)
     print(f" {'Category':<22} | {'Count':<6} | {'Recall@K':<10} | {'Prec@K':<10} | {'HitRate@K':<10} | {'MRR':<8} | {'Latency'}")
     print(f" {'-'*22} | {'-'*6} | {'-'*10} | {'-'*10} | {'-'*10} | {'-'*8} | {'-'*7}")
     for name, cat_data in [
         ("Explicit-ID Queries", metrics.get("explicit_id_queries", {})),
         ("Semantic Queries", metrics.get("semantic_queries", {})),
-        ("Negative / Benign", metrics.get("negative_queries", {})),
     ]:
         if cat_data.get("count", 0) > 0:
             print(
@@ -366,17 +472,30 @@ def print_retrieval_summary_table(
                 f"{cat_data['mean_latency_ms']:>6.1f}ms"
             )
     print(sub_bar)
-    print(" PER-CASE RETRIEVAL SUMMARY")
+    print(" 4. PER-CASE RETRIEVAL SUMMARY")
     print(sub_bar)
-    print(f" {'Sample ID':<16} | {'Type':<12} | {'ATT Rec':<8} | {'ATT Hit':<8} | {'ATT MRR':<8} | {'D3F Rec':<8} | {'Latency'}")
-    print(f" {'-'*16} | {'-'*12} | {'-'*8} | {'-'*8} | {'-'*8} | {'-'*8} | {'-'*7}")
+    print(f" {'Sample ID':<16} | {'Type':<12} | {'ATT Rec':<8} | {'ATT Hit':<8} | {'ATT MRR':<8} | {'D3F Rec':<8} | {'Status/Latency'}")
+    print(f" {'-'*16} | {'-'*12} | {'-'*8} | {'-'*8} | {'-'*8} | {'-'*8} | {'-'*14}")
     for c in case_records:
         sid = c.get("sample_id", "unknown")
         qtype = c.get("query_type", c.get("case_type", "unknown"))[:12]
-        att_rec = f"{c.get('attack_recall_at_k', 0.0)*100:.0f}%"
-        att_hit = "Yes" if c.get("attack_hit_rate_at_k", 0.0) >= 1.0 else "No"
-        att_mrr = f"{c.get('attack_mrr', 0.0):.2f}"
-        d3f_rec = f"{c.get('d3fend_recall_at_k', 0.0)*100:.0f}%"
-        lat = f"{c.get('duration_ms', 0.0):.1f}ms"
-        print(f" {sid:<16} | {qtype:<12} | {att_rec:<8} | {att_hit:<8} | {att_mrr:<8} | {d3f_rec:<8} | {lat}")
+        is_neg = c.get("is_negative", False) or qtype == "negative"
+        if is_neg:
+            att_rec = "N/A"
+            att_hit = "N/A"
+            att_mrr = "N/A"
+            d3f_rec = "N/A"
+            if c.get("has_error"):
+                status_str = f"ERROR ({c.get('duration_ms', 0.0):.0f}ms)"
+            elif c.get("is_false_positive"):
+                status_str = f"LEAK ({c.get('duration_ms', 0.0):.0f}ms)"
+            else:
+                status_str = f"CLEAN ({c.get('duration_ms', 0.0):.0f}ms)"
+        else:
+            att_rec = f"{c.get('attack_recall_at_k', 0.0)*100:.0f}%"
+            att_hit = "Yes" if c.get("attack_hit_rate_at_k", 0.0) >= 1.0 else "No"
+            att_mrr = f"{c.get('attack_mrr', 0.0):.2f}"
+            d3f_rec = f"{c.get('d3fend_recall_at_k', 0.0)*100:.0f}%"
+            status_str = f"{c.get('duration_ms', 0.0):.1f}ms"
+        print(f" {sid:<16} | {qtype:<12} | {att_rec:<8} | {att_hit:<8} | {att_mrr:<8} | {d3f_rec:<8} | {status_str}")
     print(bar + "\n")

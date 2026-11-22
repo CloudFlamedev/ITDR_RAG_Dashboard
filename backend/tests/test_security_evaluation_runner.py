@@ -1351,9 +1351,9 @@ def test_compute_hit_rate_at_k():
     # Exact match hit
     assert compute_hit_rate_at_k(["T1003.001", "T1078"], ["T1003.001"], k=5) == 1.0
 
-    # Subtechnique match hit
-    assert compute_hit_rate_at_k(["T1003", "T1078"], ["T1003.001"], k=5) == 1.0
-    assert compute_hit_rate_at_k(["T1078.004"], ["T1078"], k=5) == 1.0
+    # Parent and sub-technique IDs are strictly NOT equivalent
+    assert compute_hit_rate_at_k(["T1003", "T1078"], ["T1003.001"], k=5) == 0.0
+    assert compute_hit_rate_at_k(["T1078.004"], ["T1078"], k=5) == 0.0
 
     # Miss (no expected technique in top K)
     assert compute_hit_rate_at_k(["T1059", "T1078"], ["T1003.001"], k=5) == 0.0
@@ -1409,9 +1409,12 @@ def test_evaluate_case_retrieval_and_aggregate():
     assert c1["attack_hit_rate_at_k"] == 1.0
     assert c1["attack_mrr"] == 1.0
     assert c1["attack_recall_at_k"] == 1.0
+    assert c1["attack_precision_at_k"] == 0.2  # 1 relevant in top 5 -> 1/5 = 0.2
+    assert c1["d3fend_precision_at_k"] == 0.2  # 1 relevant in top 5 -> 1/5 = 0.2
     assert c1["duration_ms"] == 250.0
     assert c1["is_empty_retrieval"] is False
     assert c1["has_error"] is False
+    assert c1["is_negative"] is False
 
     # Case 2: Partial retrieval (rank 2)
     c2 = evaluate_case_retrieval(
@@ -1425,6 +1428,9 @@ def test_evaluate_case_retrieval_and_aggregate():
     assert c2["attack_hit_rate_at_k"] == 1.0
     assert c2["attack_mrr"] == 0.5
     assert c2["d3fend_recall_at_k"] == 0.5
+    assert c2["attack_precision_at_k"] == 0.2
+    assert c2["d3fend_precision_at_k"] == 0.2
+    assert c2["is_negative"] is False
 
     # Case 3: Empty query (negative)
     c3 = evaluate_case_retrieval(
@@ -1435,6 +1441,9 @@ def test_evaluate_case_retrieval_and_aggregate():
         k=5,
         duration_ms=100.0,
     )
+    assert c3["is_negative"] is True
+    assert c3["is_correct_empty"] is True
+    assert c3["is_false_positive"] is False
     assert c3["is_empty_retrieval"] is True
 
     # Aggregation
@@ -1445,11 +1454,17 @@ def test_evaluate_case_retrieval_and_aggregate():
     ]
     agg = aggregate_retrieval_metrics(cases)
     assert agg["total_cases"] == 3
+    assert agg["positive_cases_count"] == 2
+    assert agg["negative_cases_count"] == 1
+    assert agg["combined"]["count"] == 2  # Negative query excluded from positive metric averages
     assert agg["combined"]["error_rate"] == 0.0
     assert agg["combined"]["mean_latency_ms"] > 0.0
+    assert "positive_queries" in agg
+    assert "negative_queries" in agg
+    assert agg["negative_queries"]["correct_empty_retrieval_rate"] == 1.0
+    assert agg["negative_queries"]["false_positive_rate"] == 0.0
     assert "explicit_id_queries" in agg
     assert "semantic_queries" in agg
-    assert "negative_queries" in agg
 
 
 def test_validate_live_database_readiness_preflight():
@@ -1465,4 +1480,268 @@ def test_validate_live_database_readiness_preflight():
     except Exception as exc:
         # If running in environment without live DB, verify fail-closed exception message format
         assert "Live database readiness" in str(exc)
+
+
+def test_precision_at_k_denominator_is_k_and_fewer_than_k_results():
+    """
+    (Issue 1) Verifies Precision@K calculation:
+    Precision@K = Relevant results in top K / K.
+    Missing results within top K positions must count as non-relevant.
+    """
+    from evaluation.retrieval_metrics import compute_precision_at_k
+
+    # 1 relevant result returned out of 1 retrieved with k=5 -> 1/5 = 0.2000
+    assert compute_precision_at_k(["T1003.001"], ["T1003.001"], k=5) == 0.2
+    # 2 relevant results returned out of 2 retrieved with k=5 -> 2/5 = 0.4000
+    assert compute_precision_at_k(["T1003.001", "T1078"], ["T1003.001", "T1078"], k=5) == 0.4
+    # 2 relevant results returned out of 3 retrieved with k=5 -> 2/5 = 0.4000
+    assert compute_precision_at_k(["T1003.001", "T1078", "T1059"], ["T1003.001", "T1078"], k=5) == 0.4
+    # 0 results returned when expected has techniques with k=5 -> 0.0
+    assert compute_precision_at_k([], ["T1003.001"], k=5) == 0.0
+    # 5 results returned, all 5 relevant with k=5 -> 5/5 = 1.0000
+    all_5 = ["T1", "T2", "T3", "T4", "T5"]
+    assert compute_precision_at_k(all_5, all_5, k=5) == 1.0
+    # 6 results returned, 5 relevant in top 5 with k=5 -> 5/5 = 1.0000
+    assert compute_precision_at_k(all_5 + ["T6"], all_5 + ["T6"], k=5) == 1.0
+    # Edge case: k <= 0
+    assert compute_precision_at_k(["T1003.001"], ["T1003.001"], k=0) == 0.0
+    # Suppressed negative query (both empty) -> 1.0
+    assert compute_precision_at_k([], [], k=5) == 1.0
+    # Negative query that leaked candidates -> 0.0
+    assert compute_precision_at_k(["T1078"], [], k=5) == 0.0
+
+
+def test_exact_attack_and_d3fend_id_matching():
+    """
+    (Issue 2) Verifies exact matching for ATT&CK and D3FEND IDs.
+    Parent and sub-technique IDs (e.g., T1003 vs T1003.001) are strictly NOT equivalent.
+    """
+    from evaluation.retrieval_metrics import (
+        compute_recall_at_k,
+        compute_precision_at_k,
+        compute_hit_rate_at_k,
+        compute_mrr,
+        find_missing_and_unexpected_ids,
+    )
+
+    # 1. ATT&CK: Parent vs subtechnique must NOT match
+    # Expected: T1003.001, Retrieved: T1003
+    assert compute_recall_at_k(["T1003"], ["T1003.001"], k=5) == 0.0
+    assert compute_precision_at_k(["T1003"], ["T1003.001"], k=5) == 0.0
+    assert compute_hit_rate_at_k(["T1003"], ["T1003.001"], k=5) == 0.0
+    assert compute_mrr(["T1003"], ["T1003.001"], k=5) == 0.0
+
+    # Expected: T1078, Retrieved: T1078.004
+    assert compute_recall_at_k(["T1078.004"], ["T1078"], k=5) == 0.0
+    assert compute_hit_rate_at_k(["T1078.004"], ["T1078"], k=5) == 0.0
+
+    # Exact match works
+    assert compute_recall_at_k(["T1003.001"], ["T1003.001"], k=5) == 1.0
+    assert compute_precision_at_k(["T1003.001"], ["T1003.001"], k=5) == 0.2
+    assert compute_hit_rate_at_k(["T1003.001"], ["T1003.001"], k=5) == 1.0
+    assert compute_mrr(["T1003.001"], ["T1003.001"], k=5) == 1.0
+
+    # 2. D3FEND: Partial or prefix IDs must NOT match
+    assert compute_recall_at_k(["D3-MF"], ["D3-MFA"], k=5) == 0.0
+    assert compute_hit_rate_at_k(["D3-MF"], ["D3-MFA"], k=5) == 0.0
+    assert compute_recall_at_k(["D3-MFA"], ["D3-MFA"], k=5) == 1.0
+    assert compute_precision_at_k(["D3-MFA"], ["D3-MFA"], k=5) == 0.2
+
+    # 3. Missing and unexpected IDs
+    diff = find_missing_and_unexpected_ids(["T1003", "D3-MF"], ["T1003.001", "D3-MFA"], k=5)
+    assert "T1003.001" in diff["missing"]
+    assert "T1003" in diff["unexpected"]
+
+
+def test_separate_positive_and_negative_query_evaluation():
+    """
+    (Issue 3) Verifies that positive and negative queries are evaluated separately.
+    Negative queries must NOT inflate positive retrieval metrics.
+    Tests successful empty retrievals, false-positive leaks, and failed negative queries.
+    """
+    from evaluation.retrieval_metrics import evaluate_case_retrieval, aggregate_retrieval_metrics
+
+    # Positive query 1: Perfect retrieval (recall=1.0)
+    p1 = evaluate_case_retrieval(
+        retrieved_attack_ids=["T1003.001"],
+        expected_attack_ids=["T1003.001"],
+        retrieved_d3fend_ids=["D3-MFA"],
+        expected_d3fend_ids=["D3-MFA"],
+        k=5,
+        duration_ms=100.0,
+    )
+    assert p1["is_negative"] is False
+    assert p1["attack_recall_at_k"] == 1.0
+    assert p1["attack_precision_at_k"] == 0.2  # 1/5
+
+    # Positive query 2: Half recall (recall=0.5)
+    p2 = evaluate_case_retrieval(
+        retrieved_attack_ids=["T1078"],
+        expected_attack_ids=["T1078", "T1098.001"],
+        retrieved_d3fend_ids=["D3-UAP"],
+        expected_d3fend_ids=["D3-UAP"],
+        k=5,
+        duration_ms=150.0,
+    )
+    assert p2["is_negative"] is False
+    assert p2["attack_recall_at_k"] == 0.5
+
+    # Negative query 1: Clean empty retrieval (suppression success)
+    n1 = evaluate_case_retrieval(
+        retrieved_attack_ids=[],
+        expected_attack_ids=[],
+        retrieved_d3fend_ids=[],
+        expected_d3fend_ids=[],
+        k=5,
+        duration_ms=50.0,
+    )
+    assert n1["is_negative"] is True
+    assert n1["is_correct_empty"] is True
+    assert n1["is_false_positive"] is False
+    assert n1["has_error"] is False
+
+    # Negative query 2: False positive (leaked candidates)
+    n2 = evaluate_case_retrieval(
+        retrieved_attack_ids=["T1078"],
+        expected_attack_ids=[],
+        retrieved_d3fend_ids=[],
+        expected_d3fend_ids=[],
+        k=5,
+        duration_ms=60.0,
+    )
+    assert n2["is_negative"] is True
+    assert n2["is_correct_empty"] is False
+    assert n2["is_false_positive"] is True
+    assert n2["has_error"] is False
+
+    # Negative query 3: Failed negative query (retrieval error)
+    n3 = evaluate_case_retrieval(
+        retrieved_attack_ids=[],
+        expected_attack_ids=[],
+        retrieved_d3fend_ids=[],
+        expected_d3fend_ids=[],
+        k=5,
+        duration_ms=20.0,
+        error="Database connection timed out",
+    )
+    assert n3["is_negative"] is True
+    assert n3["has_error"] is True
+    assert n3["is_correct_empty"] is False
+    assert n3["is_false_positive"] is False
+
+    # Aggregate all 5 queries
+    cases = [
+        {**p1, "sample_id": "pos-1", "query_type": "explicit_id"},
+        {**p2, "sample_id": "pos-2", "query_type": "semantic"},
+        {**n1, "sample_id": "neg-1", "query_type": "negative"},
+        {**n2, "sample_id": "neg-2", "query_type": "negative"},
+        {**n3, "sample_id": "neg-3", "query_type": "negative"},
+    ]
+    agg = aggregate_retrieval_metrics(cases)
+
+    assert agg["total_cases"] == 5
+    assert agg["positive_cases_count"] == 2
+    assert agg["negative_cases_count"] == 3
+
+    # Positive metrics must be computed ONLY over positive queries: (1.0 + 0.5) / 2 = 0.75
+    # Must NOT include the 3 negative queries (which would dilute it to 1.5 / 5 = 0.30)
+    pos_metrics = agg["positive_queries"]
+    assert pos_metrics["count"] == 2
+    assert pos_metrics["mean_attack_recall_at_k"] == 0.75
+    assert pos_metrics["mean_attack_precision_at_k"] == 0.2
+    assert agg["combined"]["mean_attack_recall_at_k"] == 0.75
+
+    # Negative query metrics
+    neg_metrics = agg["negative_queries"]
+    assert neg_metrics["count"] == 3
+    assert neg_metrics["correct_empty_count"] == 1
+    assert neg_metrics["correct_empty_retrieval_rate"] == round(1 / 3, 4)
+    assert neg_metrics["false_positive_count"] == 1
+    assert neg_metrics["false_positive_rate"] == round(1 / 3, 4)
+    assert neg_metrics["error_count"] == 1
+    assert neg_metrics["error_rate"] == round(1 / 3, 4)
+
+
+def test_retrieval_acceptance_criteria_verification():
+    """
+    (Issue 4) Verifies acceptance criteria logic:
+    - ATT&CK and D3FEND performance in criteria
+    - Negative FPR and Error Rate in criteria
+    - Configurable thresholds
+    - Rejection of missing/N/A metrics
+    - Explicit failure reporting
+    """
+    from evaluation.run_retrieval_evaluation import verify_retrieval_acceptance, DEFAULT_RETRIEVAL_THRESHOLDS
+
+    # 1. Passing metrics
+    passing_metrics = {
+        "positive_cases_count": 10,
+        "negative_cases_count": 2,
+        "overall_error_rate": 0.0,
+        "positive_queries": {
+            "count": 10,
+            "mean_attack_recall_at_k": 0.90,
+            "mean_attack_hit_rate_at_k": 0.90,
+            "mean_d3fend_recall_at_k": 0.70,
+            "mean_d3fend_hit_rate_at_k": 0.80,
+            "error_rate": 0.0,
+        },
+        "negative_queries": {
+            "count": 2,
+            "false_positive_rate": 0.0,
+            "correct_empty_retrieval_rate": 1.0,
+            "error_rate": 0.0,
+        },
+    }
+    success, failures, checks = verify_retrieval_acceptance(passing_metrics)
+    assert success is True
+    assert len(failures) == 0
+    assert checks["attack_recall"]["passed"] is True
+    assert checks["d3fend_recall"]["passed"] is True
+    assert checks["negative_fpr"]["passed"] is True
+    assert checks["error_rate"]["passed"] is True
+
+    # 2. Failing D3FEND retrieval
+    poor_d3fend_metrics = {
+        **passing_metrics,
+        "positive_queries": {
+            **passing_metrics["positive_queries"],
+            "mean_d3fend_recall_at_k": 0.35,  # below 0.50 threshold
+        },
+    }
+    success, failures, checks = verify_retrieval_acceptance(poor_d3fend_metrics)
+    assert success is False
+    assert any("D3FEND Recall" in f for f in failures)
+
+    # 3. Failing Negative Query FPR
+    leaky_negative_metrics = {
+        **passing_metrics,
+        "negative_queries": {
+            **passing_metrics["negative_queries"],
+            "false_positive_rate": 0.50,  # exceeds 0.0 max FPR
+        },
+    }
+    success, failures, checks = verify_retrieval_acceptance(leaky_negative_metrics)
+    assert success is False
+    assert any("Negative Query False Positive Rate" in f for f in failures)
+
+    # 4. Missing/N/A metric must NOT pass
+    missing_metric_data = {
+        **passing_metrics,
+        "positive_queries": {
+            **passing_metrics["positive_queries"],
+            "mean_attack_recall_at_k": None,  # N/A
+        },
+    }
+    success, failures, checks = verify_retrieval_acceptance(missing_metric_data)
+    assert success is False
+    assert any("ATT&CK Recall" in f and "missing" in f for f in failures)
+
+    # 5. Configurable thresholds
+    custom_thresholds = {
+        "min_attack_recall": 0.95,  # Higher than actual 0.90
+    }
+    success, failures, checks = verify_retrieval_acceptance(passing_metrics, thresholds=custom_thresholds)
+    assert success is False
+    assert any("fell below required threshold (95.0%)" in f for f in failures)
 

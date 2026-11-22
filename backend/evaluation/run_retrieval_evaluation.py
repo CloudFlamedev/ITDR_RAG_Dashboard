@@ -24,7 +24,7 @@ import argparse
 import datetime
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 # Ensure backend root is in sys.path
 backend_dir = Path(__file__).resolve().parent.parent
@@ -50,6 +50,176 @@ settings = get_settings()
 
 RETRIEVAL_DATASET_VERSION = "1.0.0"
 DEFAULT_RETRIEVAL_RESULTS_DIR = Path(__file__).parent / "results" / "retrieval"
+
+DEFAULT_RETRIEVAL_THRESHOLDS = {
+    "min_attack_recall": 0.80,
+    "min_attack_hit_rate": 0.80,
+    "min_d3fend_recall": 0.50,
+    "min_d3fend_hit_rate": 0.60,
+    "max_negative_fpr": 0.00,
+    "max_error_rate": 0.00,
+}
+
+
+def verify_retrieval_acceptance(
+    metrics: Dict[str, Any],
+    thresholds: Optional[Dict[str, float]] = None,
+    k: int = 5,
+) -> Tuple[bool, List[str], Dict[str, Any]]:
+    """
+    Evaluates whether retrieval metrics meet configured acceptance criteria.
+    Validates:
+    1. ATT&CK Recall@K and Hit Rate@K
+    2. D3FEND Recall@K and Hit Rate@K
+    3. Negative query False Positive Rate (FPR)
+    4. Overall Retrieval Error Rate
+    Fails closed if any metric is missing (N/A) or below required threshold.
+    Returns (success, failure_reasons, check_details).
+    """
+    th = {**DEFAULT_RETRIEVAL_THRESHOLDS, **(thresholds or {})}
+    failures = []
+    checks = {}
+
+    pos = metrics.get("positive_queries") or metrics.get("combined") or {}
+    pos_count = metrics.get("positive_cases_count", pos.get("count", 0))
+
+    if pos_count == 0:
+        failures.append("No positive test cases evaluated; positive retrieval metrics are missing (N/A).")
+        checks["positive_count"] = {"actual": 0, "threshold": 1, "passed": False}
+    else:
+        checks["positive_count"] = {"actual": pos_count, "threshold": 1, "passed": True}
+        # 1. ATT&CK Recall@K
+        att_recall = pos.get("mean_attack_recall_at_k")
+        if att_recall is None:
+            failures.append(f"ATT&CK Recall@{k} is missing (N/A).")
+            checks["attack_recall"] = {"actual": None, "threshold": th["min_attack_recall"], "passed": False}
+        elif att_recall < th["min_attack_recall"]:
+            failures.append(
+                f"ATT&CK Recall@{k} ({att_recall * 100:.1f}%) fell below required threshold ({th['min_attack_recall'] * 100:.1f}%)."
+            )
+            checks["attack_recall"] = {"actual": att_recall, "threshold": th["min_attack_recall"], "passed": False}
+        else:
+            checks["attack_recall"] = {"actual": att_recall, "threshold": th["min_attack_recall"], "passed": True}
+
+        # 2. ATT&CK Hit Rate@K
+        att_hit = pos.get("mean_attack_hit_rate_at_k")
+        if att_hit is None:
+            failures.append(f"ATT&CK Hit Rate@{k} is missing (N/A).")
+            checks["attack_hit_rate"] = {"actual": None, "threshold": th["min_attack_hit_rate"], "passed": False}
+        elif att_hit < th["min_attack_hit_rate"]:
+            failures.append(
+                f"ATT&CK Hit Rate@{k} ({att_hit * 100:.1f}%) fell below required threshold ({th['min_attack_hit_rate'] * 100:.1f}%)."
+            )
+            checks["attack_hit_rate"] = {"actual": att_hit, "threshold": th["min_attack_hit_rate"], "passed": False}
+        else:
+            checks["attack_hit_rate"] = {"actual": att_hit, "threshold": th["min_attack_hit_rate"], "passed": True}
+
+        # 3. D3FEND Recall@K
+        d3f_recall = pos.get("mean_d3fend_recall_at_k")
+        if d3f_recall is None:
+            failures.append(f"D3FEND Recall@{k} is missing (N/A).")
+            checks["d3fend_recall"] = {"actual": None, "threshold": th["min_d3fend_recall"], "passed": False}
+        elif d3f_recall < th["min_d3fend_recall"]:
+            failures.append(
+                f"D3FEND Recall@{k} ({d3f_recall * 100:.1f}%) fell below required threshold ({th['min_d3fend_recall'] * 100:.1f}%)."
+            )
+            checks["d3fend_recall"] = {"actual": d3f_recall, "threshold": th["min_d3fend_recall"], "passed": False}
+        else:
+            checks["d3fend_recall"] = {"actual": d3f_recall, "threshold": th["min_d3fend_recall"], "passed": True}
+
+        # 4. D3FEND Hit Rate@K
+        d3f_hit = pos.get("mean_d3fend_hit_rate_at_k")
+        if d3f_hit is None:
+            failures.append(f"D3FEND Hit Rate@{k} is missing (N/A).")
+            checks["d3fend_hit_rate"] = {"actual": None, "threshold": th["min_d3fend_hit_rate"], "passed": False}
+        elif d3f_hit < th["min_d3fend_hit_rate"]:
+            failures.append(
+                f"D3FEND Hit Rate@{k} ({d3f_hit * 100:.1f}%) fell below required threshold ({th['min_d3fend_hit_rate'] * 100:.1f}%)."
+            )
+            checks["d3fend_hit_rate"] = {"actual": d3f_hit, "threshold": th["min_d3fend_hit_rate"], "passed": False}
+        else:
+            checks["d3fend_hit_rate"] = {"actual": d3f_hit, "threshold": th["min_d3fend_hit_rate"], "passed": True}
+
+    # 5. Negative Query False Positive Rate
+    neg = metrics.get("negative_queries") or {}
+    neg_count = metrics.get("negative_cases_count", neg.get("count", 0))
+    if neg_count > 0:
+        neg_fpr = neg.get("false_positive_rate")
+        if neg_fpr is None:
+            failures.append("Negative Query False Positive Rate is missing (N/A).")
+            checks["negative_fpr"] = {"actual": None, "threshold": th["max_negative_fpr"], "passed": False}
+        elif neg_fpr > th["max_negative_fpr"]:
+            failures.append(
+                f"Negative Query False Positive Rate ({neg_fpr * 100:.1f}%) exceeded maximum allowed threshold ({th['max_negative_fpr'] * 100:.1f}%)."
+            )
+            checks["negative_fpr"] = {"actual": neg_fpr, "threshold": th["max_negative_fpr"], "passed": False}
+        else:
+            checks["negative_fpr"] = {"actual": neg_fpr, "threshold": th["max_negative_fpr"], "passed": True}
+    else:
+        checks["negative_fpr"] = {"actual": None, "threshold": th["max_negative_fpr"], "passed": True, "note": "No negative queries"}
+
+    # 6. Overall Error Rate
+    err_rate = metrics.get("overall_error_rate")
+    if err_rate is None:
+        err_rate = pos.get("error_rate")
+    if err_rate is None:
+        failures.append("Retrieval Error Rate is missing (N/A).")
+        checks["error_rate"] = {"actual": None, "threshold": th["max_error_rate"], "passed": False}
+    elif err_rate > th["max_error_rate"]:
+        failures.append(
+            f"Retrieval Error Rate ({err_rate * 100:.1f}%) exceeded maximum allowed threshold ({th['max_error_rate'] * 100:.1f}%)."
+        )
+        checks["error_rate"] = {"actual": err_rate, "threshold": th["max_error_rate"], "passed": False}
+    else:
+        checks["error_rate"] = {"actual": err_rate, "threshold": th["max_error_rate"], "passed": True}
+
+    success = len(failures) == 0
+    return success, failures, checks
+
+
+def print_retrieval_acceptance_report(
+    success: bool,
+    failures: List[str],
+    checks: Dict[str, Any],
+    thresholds: Dict[str, float],
+    k: int = 5,
+):
+    """Prints a clear, formatted acceptance verification report."""
+    bar = "=" * 84
+    sub = "-" * 84
+    print("\n" + bar)
+    print(" RETRIEVAL ACCEPTANCE CRITERIA VERIFICATION")
+    print(bar)
+    status_str = "PASSED" if success else "FAILED"
+    print(f" Acceptance Status: {status_str}")
+    print(sub)
+    print(f" {'Metric / Acceptance Check':<40} | {'Actual':<12} | {'Threshold':<12} | {'Result'}")
+    print(f" {'-'*40} | {'-'*12} | {'-'*12} | {'-'*8}")
+
+    criteria = [
+        (f"ATT&CK Technique Recall@{k}", "attack_recall", ">=", "min_attack_recall"),
+        (f"ATT&CK Technique Hit Rate@{k}", "attack_hit_rate", ">=", "min_attack_hit_rate"),
+        (f"D3FEND Countermeasure Recall@{k}", "d3fend_recall", ">=", "min_d3fend_recall"),
+        (f"D3FEND Countermeasure Hit Rate@{k}", "d3fend_hit_rate", ">=", "min_d3fend_hit_rate"),
+        ("Negative Query False Positive Rate", "negative_fpr", "<=", "max_negative_fpr"),
+        ("Overall Retrieval Error Rate", "error_rate", "<=", "max_error_rate"),
+    ]
+    for name, key, op, th_key in criteria:
+        c = checks.get(key, {})
+        passed = c.get("passed", False)
+        actual = c.get("actual")
+        th_val = thresholds.get(th_key, 0.0)
+        actual_str = f"{actual * 100:.1f}%" if actual is not None else "N/A"
+        th_str = f"{op} {th_val * 100:.1f}%"
+        res_str = "PASS" if passed else "FAIL"
+        print(f" {name:<40} | {actual_str:<12} | {th_str:<12} | {res_str}")
+
+    if failures:
+        print(sub)
+        print(" Specific Acceptance Failures:")
+        for idx, f in enumerate(failures, start=1):
+            print(f"   {idx}. {f}")
+    print(bar + "\n")
 
 
 def load_retrieval_dataset(dataset_path: Path) -> List[Dict[str, Any]]:
@@ -79,6 +249,7 @@ def export_retrieval_results(
     case_records: List[Dict[str, Any]],
     k: int = 5,
     db_info: Optional[Dict[str, Any]] = None,
+    acceptance_summary: Optional[Dict[str, Any]] = None,
 ):
     """Exports retrieval evaluation results to JSON and CSV reports."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -91,6 +262,7 @@ def export_retrieval_results(
         "dataset_version": RETRIEVAL_DATASET_VERSION,
         "k_cutoff": k,
         "database_info": db_info or {},
+        "acceptance_verification": acceptance_summary or {},
         "aggregate_retrieval_metrics": metrics,
         "detailed_case_results": mask_sensitive_payloads(case_records),
     }
@@ -103,6 +275,9 @@ def export_retrieval_results(
     fieldnames = [
         "sample_id",
         "query_type",
+        "is_negative",
+        "is_false_positive",
+        "is_correct_empty",
         "query",
         "expected_attack_ids",
         "retrieved_attack_ids",
@@ -150,10 +325,11 @@ def run_retrieval_evaluation(
     max_candidates: int = 8,
     limit: Optional[int] = None,
     sample_ids: Optional[List[str]] = None,
+    thresholds: Optional[Dict[str, float]] = None,
 ) -> bool:
     """
     Executes retrieval evaluation against the live PostgreSQL/pgvector database.
-    Fails closed if the database is not ready.
+    Fails closed if the database is not ready or if configured acceptance criteria fail.
     """
     out_dir = output_dir or DEFAULT_RETRIEVAL_RESULTS_DIR
     logger.info("Verifying PostgreSQL/pgvector database readiness...")
@@ -231,12 +407,17 @@ def run_retrieval_evaluation(
         }
         case_records.append(record)
 
-        hit_str = "Hit" if eval_res["attack_hit_rate_at_k"] >= 1.0 else "Miss"
-        logger.info(
-            f"  ✓ {sid}: ATT Rec@{k}={eval_res['attack_recall_at_k']*100:.0f}%, "
-            f"ATT Hit={hit_str}, ATT MRR={eval_res['attack_mrr']:.2f}, "
-            f"Latency={duration_ms:.1f}ms"
-        )
+        if eval_res.get("is_negative"):
+            status_text = "Clean" if eval_res.get("is_correct_empty") else ("Error" if eval_res.get("has_error") else "FalsePositive")
+            logger.info(f"  ✓ {sid} (Negative): Status={status_text}, Latency={duration_ms:.1f}ms")
+        else:
+            hit_str = "Hit" if eval_res["attack_hit_rate_at_k"] >= 1.0 else "Miss"
+            logger.info(
+                f"  ✓ {sid}: ATT Rec@{k}={eval_res['attack_recall_at_k']*100:.0f}%, "
+                f"ATT Hit={hit_str}, ATT MRR={eval_res['attack_mrr']:.2f}, "
+                f"D3F Rec@{k}={eval_res['d3fend_recall_at_k']*100:.0f}%, "
+                f"Latency={duration_ms:.1f}ms"
+            )
 
     # Aggregate metrics
     metrics = aggregate_retrieval_metrics(case_records)
@@ -244,14 +425,38 @@ def run_retrieval_evaluation(
     # Print ASCII summary report
     print_retrieval_summary_table(metrics, case_records, k=k)
 
-    # Export reports
-    export_retrieval_results(out_dir, metrics, case_records, k=k, db_info=db_info)
-
-    comb = metrics.get("combined", {})
-    success = (
-        comb.get("error_rate", 1.0) == 0.0
-        and comb.get("mean_attack_hit_rate_at_k", 0.0) >= 0.80
+    # Verify acceptance criteria
+    eff_thresholds = {**DEFAULT_RETRIEVAL_THRESHOLDS, **(thresholds or {})}
+    success, failures, check_details = verify_retrieval_acceptance(
+        metrics=metrics,
+        thresholds=eff_thresholds,
+        k=k,
     )
+
+    # Print acceptance report
+    print_retrieval_acceptance_report(
+        success=success,
+        failures=failures,
+        checks=check_details,
+        thresholds=eff_thresholds,
+        k=k,
+    )
+
+    # Export reports
+    export_retrieval_results(
+        out_dir,
+        metrics,
+        case_records,
+        k=k,
+        db_info=db_info,
+        acceptance_summary={
+            "success": success,
+            "thresholds": eff_thresholds,
+            "failures": failures,
+            "checks": check_details,
+        },
+    )
+
     return success
 
 
@@ -293,10 +498,56 @@ def main():
         default=None,
         help="Filter to specific sample_ids (e.g. --sample-ids ret-001 ret-002)",
     )
+    # Configurable Acceptance Thresholds
+    parser.add_argument(
+        "--min-attack-recall",
+        type=float,
+        default=DEFAULT_RETRIEVAL_THRESHOLDS["min_attack_recall"],
+        help=f"Minimum ATT&CK Recall@K required to pass (default: {DEFAULT_RETRIEVAL_THRESHOLDS['min_attack_recall']})",
+    )
+    parser.add_argument(
+        "--min-attack-hit-rate",
+        type=float,
+        default=DEFAULT_RETRIEVAL_THRESHOLDS["min_attack_hit_rate"],
+        help=f"Minimum ATT&CK Hit Rate@K required to pass (default: {DEFAULT_RETRIEVAL_THRESHOLDS['min_attack_hit_rate']})",
+    )
+    parser.add_argument(
+        "--min-d3fend-recall",
+        type=float,
+        default=DEFAULT_RETRIEVAL_THRESHOLDS["min_d3fend_recall"],
+        help=f"Minimum D3FEND Recall@K required to pass (default: {DEFAULT_RETRIEVAL_THRESHOLDS['min_d3fend_recall']})",
+    )
+    parser.add_argument(
+        "--min-d3fend-hit-rate",
+        type=float,
+        default=DEFAULT_RETRIEVAL_THRESHOLDS["min_d3fend_hit_rate"],
+        help=f"Minimum D3FEND Hit Rate@K required to pass (default: {DEFAULT_RETRIEVAL_THRESHOLDS['min_d3fend_hit_rate']})",
+    )
+    parser.add_argument(
+        "--max-negative-fpr",
+        type=float,
+        default=DEFAULT_RETRIEVAL_THRESHOLDS["max_negative_fpr"],
+        help=f"Maximum allowed False Positive Rate for negative queries (default: {DEFAULT_RETRIEVAL_THRESHOLDS['max_negative_fpr']})",
+    )
+    parser.add_argument(
+        "--max-error-rate",
+        type=float,
+        default=DEFAULT_RETRIEVAL_THRESHOLDS["max_error_rate"],
+        help=f"Maximum allowed retrieval error rate (default: {DEFAULT_RETRIEVAL_THRESHOLDS['max_error_rate']})",
+    )
 
     args = parser.parse_args()
     dataset_path = Path(args.dataset)
     output_dir = Path(args.output_dir)
+
+    thresholds = {
+        "min_attack_recall": args.min_attack_recall,
+        "min_attack_hit_rate": args.min_attack_hit_rate,
+        "min_d3fend_recall": args.min_d3fend_recall,
+        "min_d3fend_hit_rate": args.min_d3fend_hit_rate,
+        "max_negative_fpr": args.max_negative_fpr,
+        "max_error_rate": args.max_error_rate,
+    }
 
     success = run_retrieval_evaluation(
         dataset_path=dataset_path,
@@ -305,6 +556,7 @@ def main():
         max_candidates=args.max_candidates,
         limit=args.limit,
         sample_ids=args.sample_ids,
+        thresholds=thresholds,
     )
 
     sys.exit(0 if success else 1)
