@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     GROQ_API_KEY_NEW_FOR_TESTING: Optional[str] = Field(default=None, description="Testing Groq API key for CI/evaluation")
     GROQ_API_BASE: str = Field(default="https://api.groq.com/openai/v1", description="Groq API base URL")
     GROQ_MODEL: str = Field(default="openai/gpt-oss-120b", description="Default Groq model")
+    LLM_PROVIDER: Optional[str] = Field(
+        default=None,
+        description="Explicit LLM provider override: 'groq' or 'xai'. When None, uses credential auto-detection."
+    )
 
     # Jina AI Embeddings & Reranker Configuration
     JINA_API_KEY: Optional[str] = Field(default=None, description="Jina AI API key for embeddings and reranker")
@@ -211,8 +215,34 @@ class Settings(BaseSettings):
         return "neon.tech" in self.DATABASE_URL or "sslmode=require" in self.DATABASE_URL
 
     @property
+    def effective_llm_provider(self) -> str:
+        """Returns the active provider name: 'groq' or 'xai'."""
+        if self.LLM_PROVIDER and self.LLM_PROVIDER.strip().lower() in ("groq", "xai"):
+            return self.LLM_PROVIDER.strip().lower()
+        if self.is_groq:
+            return "groq"
+        return "xai"
+
+    @property
     def effective_llm_key(self) -> Optional[str]:
-        """Returns active LLM key, prioritizing GROQ_API_KEY_NEW_FOR_TESTING, GROQ_API_KEY, or XAI_API_KEY."""
+        """
+        Returns active LLM key.
+        If LLM_PROVIDER is explicitly 'xai', returns XAI_API_KEY.
+        If LLM_PROVIDER is explicitly 'groq', returns GROQ_API_KEY_NEW_FOR_TESTING or GROQ_API_KEY.
+        Otherwise prioritizes GROQ_API_KEY_NEW_FOR_TESTING, GROQ_API_KEY, or XAI_API_KEY.
+        """
+        if self.LLM_PROVIDER:
+            prov = self.LLM_PROVIDER.strip().lower()
+            if prov == "xai":
+                if self.XAI_API_KEY and not self.XAI_API_KEY.startswith("replace-") and self.XAI_API_KEY.strip():
+                    return self.XAI_API_KEY.strip()
+                return None
+            elif prov == "groq":
+                for key in (self.GROQ_API_KEY_NEW_FOR_TESTING, self.GROQ_API_KEY):
+                    if key and not key.startswith("replace-") and key.strip():
+                        return key.strip()
+                return None
+
         for key in (self.GROQ_API_KEY_NEW_FOR_TESTING, self.GROQ_API_KEY, self.XAI_API_KEY):
             if key and not key.startswith("replace-") and not key.strip() == "":
                 return key.strip()
@@ -221,6 +251,8 @@ class Settings(BaseSettings):
     @property
     def is_groq(self) -> bool:
         """Returns True if the active provider is Groq."""
+        if self.LLM_PROVIDER and self.LLM_PROVIDER.strip().lower() in ("groq", "xai"):
+            return self.LLM_PROVIDER.strip().lower() == "groq"
         key = self.effective_llm_key or ""
         base = self.effective_llm_base or ""
         if (self.GROQ_API_KEY_NEW_FOR_TESTING and key == self.GROQ_API_KEY_NEW_FOR_TESTING.strip()) or \
@@ -231,6 +263,13 @@ class Settings(BaseSettings):
     @property
     def effective_llm_base(self) -> str:
         """Returns API base URL for LLM calls."""
+        if self.LLM_PROVIDER:
+            prov = self.LLM_PROVIDER.strip().lower()
+            if prov == "xai":
+                return self.XAI_API_BASE or "https://api.x.ai/v1"
+            elif prov == "groq":
+                return self.GROQ_API_BASE or "https://api.groq.com/openai/v1"
+
         key = self.effective_llm_key or ""
         if (self.GROQ_API_KEY_NEW_FOR_TESTING and key == self.GROQ_API_KEY_NEW_FOR_TESTING.strip()) or \
            (self.GROQ_API_KEY and key == self.GROQ_API_KEY.strip()) or \
@@ -241,6 +280,13 @@ class Settings(BaseSettings):
     @property
     def effective_llm_model(self) -> str:
         """Returns model name for LLM calls."""
+        if self.LLM_PROVIDER:
+            prov = self.LLM_PROVIDER.strip().lower()
+            if prov == "xai":
+                return self.XAI_MODEL or "grok-4.7"
+            elif prov == "groq":
+                return self.GROQ_MODEL or "openai/gpt-oss-120b"
+
         if self.is_groq:
             return self.GROQ_MODEL or "openai/gpt-oss-120b"
         return self.XAI_MODEL or "grok-4.7"

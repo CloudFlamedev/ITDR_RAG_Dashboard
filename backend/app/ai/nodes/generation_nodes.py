@@ -37,6 +37,16 @@ try:
 except Exception:
     pass
 
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:
+    ChatOpenAI = None
+
+try:
+    from langchain_xai import ChatXAI
+except ImportError:
+    ChatXAI = None
+
 _authoritative_attack_ids: Optional[Set[str]] = None
 _authoritative_d3fend_ids: Optional[Set[str]] = None
 _taxonomy_lock = threading.Lock()
@@ -137,29 +147,61 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
 
     raw_response = None
     report_dict = None
-    model_provider = "xAI Grok"
-    model_name = settings.XAI_MODEL
 
-    if settings.has_xai_key:
+    # Explicit provider selection: state > settings.LLM_PROVIDER > auto-detect
+    explicit_provider = state.get("llm_provider") or getattr(settings, "LLM_PROVIDER", None)
+    if explicit_provider:
+        selected_provider = explicit_provider.strip().lower()
+    elif settings.is_groq:
+        selected_provider = "groq"
+    else:
+        selected_provider = "xai"
+
+    # Resolve active credentials, base URL, and candidate models for selected provider
+    if selected_provider == "groq":
+        active_key = (
+            getattr(settings, "GROQ_API_KEY_NEW_FOR_TESTING", None)
+            or getattr(settings, "GROQ_API_KEY", None)
+        )
+        if active_key:
+            active_key = active_key.strip()
+        active_base = getattr(settings, "GROQ_API_BASE", None) or "https://api.groq.com/openai/v1"
+        configured_model = state.get("llm_model") or getattr(settings, "GROQ_MODEL", None) or "openai/gpt-oss-120b"
+        models_to_try = [configured_model]
+        for alt in ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
+            if alt not in models_to_try:
+                models_to_try.append(alt)
+    else:
+        active_key = getattr(settings, "XAI_API_KEY", None)
+        if active_key:
+            active_key = active_key.strip()
+        active_base = getattr(settings, "XAI_API_BASE", None) or "https://api.x.ai/v1"
+        configured_model = state.get("llm_model") or getattr(settings, "XAI_MODEL", None) or "grok-4.7"
+        models_to_try = [configured_model]
+
+    has_active_key = bool(active_key and not active_key.startswith("replace-") and active_key.strip())
+
+    provider_request_attempted = False
+    provider_response_received = False
+    offline_fallback_used = False
+    token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    used_model = configured_model
+    model_name = configured_model
+    model_provider = f"Groq LLM ({configured_model})" if selected_provider == "groq" else f"xAI Grok ({configured_model})"
+
+    if has_active_key:
         try:
-            models_to_try = [settings.effective_llm_model]
-            if settings.is_groq:
-                for alt in ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
-                    if alt not in models_to_try:
-                        models_to_try.append(alt)
-
             last_err = None
             response = None
-            used_model = settings.effective_llm_model
-            token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
             for test_model in models_to_try:
                 try:
-                    if settings.is_groq:
-                        from langchain_openai import ChatOpenAI
+                    if selected_provider == "groq":
+                        if ChatOpenAI is None:
+                            raise ImportError("langchain_openai is required for Groq provider")
                         llm = ChatOpenAI(
-                            api_key=settings.effective_llm_key,
-                            base_url=settings.effective_llm_base,
+                            api_key=active_key,
+                            base_url=active_base,
                             model=test_model,
                             timeout=30,
                             temperature=0.1,
@@ -167,10 +209,11 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                             max_retries=0,
                         )
                     else:
-                        from langchain_xai import ChatXAI
+                        if ChatXAI is None:
+                            raise ImportError("langchain_xai is required for xAI provider")
                         llm = ChatXAI(
-                            xai_api_key=settings.effective_llm_key,
-                            xai_api_base=settings.effective_llm_base,
+                            xai_api_key=active_key,
+                            xai_api_base=active_base,
                             model=test_model,
                             timeout=30,
                             temperature=0.1,
@@ -182,6 +225,7 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                         SystemMessage(content=messages[0]["content"]),
                         HumanMessage(content=messages[1]["content"]),
                     ]
+                    provider_request_attempted = True
                     response = llm.invoke(lc_messages, config={"callbacks": [CallbackHandler()]})
                     content = (response.content or "").strip()
                     if not content and hasattr(response, "additional_kwargs"):
@@ -195,10 +239,11 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                         logger.warning(f"Model {test_model} returned empty content; trying next candidate model...")
                         continue
 
+                    provider_response_received = True
                     raw_response = content
                     used_model = test_model
                     model_name = test_model
-                    model_provider = f"Groq LLM ({test_model})" if settings.is_groq else f"xAI Grok ({test_model})"
+                    model_provider = f"Groq LLM ({test_model})" if selected_provider == "groq" else f"xAI Grok ({test_model})"
                     usage_dict = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage") or {}
                     token_usage = {
                         "input_tokens": int(usage_dict.get("input_tokens") or usage_dict.get("prompt_tokens") or 0),
@@ -221,11 +266,10 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                     raise
 
             if response is None or not raw_response:
-                raise last_err or RuntimeError("No compatible model returned content on provider API")
+                raise last_err or RuntimeError(f"No compatible model returned content on {selected_provider} API")
 
             # Parse JSON with json-repair for guaranteed structured object recovery
             from json_repair import repair_json
-            report_dict = None
             try:
                 parsed = repair_json(raw_response, return_objects=True)
                 if isinstance(parsed, dict):
@@ -251,17 +295,19 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                 raise ValueError("Could not parse valid JSON dictionary from LLM response")
 
         except Exception as e:
-            logger.warning(f"Grok LLM call failed or timed out ({e}); falling back to grounded synthesis.")
-            model_provider = "xAI Grok (Fallback Synthesis - API Error/Quota)"
-            raw_response = f"Grok API invocation encountered: {str(e)}"
-            report_dict = _synthesize_grounded_report(state, note=f"Generated via grounded synthesis due to Grok provider error: {str(e)}")
+            logger.warning(f"LLM call to {selected_provider} failed or timed out ({e}); falling back to grounded synthesis.")
+            offline_fallback_used = True
+            model_provider = f"{'Groq' if selected_provider == 'groq' else 'xAI Grok'} (Fallback Synthesis - API Error/Quota)"
+            raw_response = f"{selected_provider.upper()} API invocation encountered: {str(e)}"
+            report_dict = _synthesize_grounded_report(state, note=f"Generated via grounded synthesis due to {selected_provider} provider error: {str(e)}")
     else:
         # Grounded synthesis without calling external paid API
+        offline_fallback_used = True
         model_provider = "Grok Engine (Offline Grounded Synthesis)"
-        report_dict = _synthesize_grounded_report(state, note="Generated using authoritative retrieved context (xAI API key not configured in environment)")
+        report_dict = _synthesize_grounded_report(state, note="Generated using authoritative retrieved context (API key not configured in environment)")
         raw_response = json.dumps(report_dict, indent=2)
 
-    is_fallback = "Fallback Synthesis" in model_provider or "Offline Grounded Synthesis" in model_provider
+    is_fallback = offline_fallback_used
     if isinstance(report_dict, dict):
         report_dict["is_fallback_generation"] = is_fallback
         report_dict["model_provider"] = model_provider
@@ -275,7 +321,11 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
         "metadata": {
             "model_provider": model_provider,
             "model_name": model_name,
+            "selected_provider": selected_provider,
             "is_fallback_generation": is_fallback,
+            "provider_request_attempted": provider_request_attempted,
+            "provider_response_received": provider_response_received,
+            "offline_fallback_used": offline_fallback_used,
             "has_raw_response": bool(raw_response),
             "token_usage": token_usage,
         },
@@ -289,7 +339,11 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
             metadata={
                 "model_provider": model_provider,
                 "model_name": model_name,
+                "selected_provider": selected_provider,
                 "is_fallback_generation": is_fallback,
+                "provider_request_attempted": provider_request_attempted,
+                "provider_response_received": provider_response_received,
+                "offline_fallback_used": offline_fallback_used,
                 "report_id": state.get("report_id"),
                 "duration_ms": round((time.perf_counter() - start) * 1000, 2),
                 "token_usage": token_usage,
@@ -303,6 +357,11 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
         "structured_report": report_dict,
         "is_fallback_generation": is_fallback,
         "token_usage": token_usage,
+        "provider_request_attempted": provider_request_attempted,
+        "provider_response_received": provider_response_received,
+        "offline_fallback_used": offline_fallback_used,
+        "llm_provider": selected_provider,
+        "llm_model": model_name,
         "trace_steps": state["trace_steps"] + [trace_step],
     }
 

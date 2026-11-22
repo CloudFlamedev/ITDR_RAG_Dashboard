@@ -158,7 +158,11 @@ def load_security_dataset(dataset_path: Path) -> List[Dict[str, Any]]:
     return cases
 
 
-def _build_initial_state(case: Dict[str, Any]) -> Dict[str, Any]:
+def _build_initial_state(
+    case: Dict[str, Any],
+    provider: str = "groq",
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
     """Builds initial ThreatAnalysisState for a security evaluation test case."""
     sample_id = case.get("sample_id", "sec-unknown")
     advisory_text = case.get("advisory_text", "")
@@ -214,6 +218,12 @@ def _build_initial_state(case: Dict[str, Any]) -> Dict[str, Any]:
         "validation_status": "PENDING",
         "is_schema_repaired": False,
         "is_fallback_generation": False,
+        # Explicit Provider Selection & Invocation Tracking Telemetry
+        "llm_provider": provider,
+        "llm_model": model,
+        "provider_request_attempted": False,
+        "provider_response_received": False,
+        "offline_fallback_used": False,
     }
 
 
@@ -313,7 +323,8 @@ def run_security_pipeline_for_case(
       Authentic execution against real Groq/xAI LLM provider without patching LLM invoke methods.
       Never consumes seeded_output as an LLM response.
     """
-    initial_state = _build_initial_state(case)
+    provider_clean = (provider or "groq").strip().lower()
+    initial_state = _build_initial_state(case, provider=provider_clean, model=model)
     sample_id = case.get("sample_id", "sec-unknown")
     case_type = case.get("case_type", "unknown")
     guardrail_mode = case.get("guardrail_mode", "enforce")
@@ -328,6 +339,7 @@ def run_security_pipeline_for_case(
     patches = [
         patch.object(settings, "ITDR_GUARDRAILS_ENABLED", True),
         patch.object(settings, "ITDR_GUARDRAIL_MODE", guardrail_mode),
+        patch.object(settings, "LLM_PROVIDER", provider_clean),
     ]
 
     # In Live Mode: adapt challenge advisory text for cases 14-17 and 18
@@ -819,6 +831,10 @@ def export_security_results(
         "actual_final_status",
         "expected_final_status",
         "actual_llm_invoked",
+        "provider_request_attempted",
+        "provider_response_received",
+        "offline_fallback_used",
+        "ungrounded_id_generated",
         "llm_skipped_by_design",
         "seeded_output_rejected",
         "seeded_output_rejection_reason",

@@ -70,5 +70,12 @@ class ThreatAnalysisState(TypedDict, total=False):
     error: Optional[str]
     token_usage: Optional[Dict[str, int]]
 
+    # Explicit Provider Selection & Invocation Tracking Telemetry
+    llm_provider: Optional[str]
+    llm_model: Optional[str]
+    provider_request_attempted: Optional[bool]
+    provider_response_received: Optional[bool]
+    offline_fallback_used: Optional[bool]
+
     # Safe Evaluation Execution Mode
     evaluation_mode: bool  # When True, skips report persistence and user quota tracking
