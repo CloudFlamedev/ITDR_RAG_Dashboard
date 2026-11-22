@@ -311,6 +311,24 @@ def validate_output_safety(state: ThreatAnalysisState) -> Dict[str, Any]:
         elif res.get("status") == "UNGROUNDED" and settings.guardrails_enforce:
             review_reasons.append("Generated report contains unsupported technique IDs not backed by retrieved evidence.")
 
+        unsupported_att = state.get("unsupported_attack_ids", [])
+        unsupported_d3f = state.get("unsupported_d3fend_ids", [])
+        ungrounded_id_detected = bool(unsupported_att or unsupported_d3f or res.get("has_unsupported_findings", False))
+
+        # Determine status adjustment for non-verified outputs
+        new_status = state.get("status", "COMPLETED")
+        if res["status"] in ["SCHEMA_REPAIRED", "FALLBACK_UNVERIFIED"]:
+            new_status = "PARTIAL"
+        elif settings.guardrails_enforce and res["status"] in ["UNGROUNDED", "UNSAFE", "FLAGGED"]:
+            new_status = "NEEDS_REVIEW"
+
+        ungrounded_guardrail_intercepted = bool(
+            ungrounded_id_detected
+            and not res.get("is_verified", False)
+            and res.get("status") == "UNGROUNDED"
+            and (new_status in ["NEEDS_REVIEW", "BLOCKED", "SECURITY_REVIEW"] or len(review_reasons) > 0)
+        )
+
         trace_step = {
             "step_name": "validate_output_safety",
             "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -325,6 +343,8 @@ def validate_output_safety(state: ThreatAnalysisState) -> Dict[str, Any]:
                 "findings_count": len(res["findings"]),
                 "findings": res["findings"],
                 "has_unsupported_findings": res.get("has_unsupported_findings", False),
+                "ungrounded_id_detected": ungrounded_id_detected,
+                "ungrounded_guardrail_intercepted": ungrounded_guardrail_intercepted,
             },
             "error": None,
         }
@@ -334,19 +354,14 @@ def validate_output_safety(state: ThreatAnalysisState) -> Dict[str, Any]:
             report_dict["is_verified"] = res["is_verified"]
             report_dict["output_security_status"] = res["status"]
 
-        # Determine status adjustment for non-verified outputs
-        new_status = state.get("status", "COMPLETED")
-        if res["status"] in ["SCHEMA_REPAIRED", "FALLBACK_UNVERIFIED"]:
-            new_status = "PARTIAL"
-        elif settings.guardrails_enforce and res["status"] in ["UNGROUNDED", "UNSAFE", "FLAGGED"]:
-            new_status = "NEEDS_REVIEW"
-
         return {
             "output_security_status": res["status"],
             "output_security_findings": res["findings"],
             "review_reasons": review_reasons,
             "structured_report": report_dict,
             "status": new_status,
+            "ungrounded_id_detected": ungrounded_id_detected,
+            "ungrounded_guardrail_intercepted": ungrounded_guardrail_intercepted,
             "trace_steps": state.get("trace_steps", []) + [trace_step],
         }
 

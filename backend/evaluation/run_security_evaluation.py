@@ -120,6 +120,63 @@ def validate_live_credentials(provider: str) -> str:
         raise ValueError(f"Unsupported LLM provider '{provider}'. Must be 'groq' or 'xai'.")
 
 
+def validate_live_database_readiness() -> Dict[str, Any]:
+    """
+    Validates PostgreSQL database readiness for live vector retrieval.
+    Pre-flight verification ensures:
+    1. Database connection is active.
+    2. pgvector extension is installed.
+    3. Required tables exist: rag_documents, attack_techniques, d3fend_techniques.
+    4. Indexed records count > 0 in rag_documents.
+    5. Embedding model availability / configuration.
+    Fails closed with a clear, sanitized error message if not satisfied.
+    """
+    from sqlalchemy import text
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        # 1. Connection check
+        db.execute(text("SELECT 1"))
+
+        # 2. pgvector extension check
+        ext = db.execute(text("SELECT extname, extversion FROM pg_extension WHERE extname = 'vector'")).fetchone()
+        if not ext:
+            raise RuntimeError("Live database readiness failed: pgvector extension is not installed.")
+        vector_version = ext[1]
+
+        # 3. Required tables check
+        tables = db.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")).fetchall()
+        table_names = {t[0] for t in tables}
+        required_tables = ["rag_documents", "attack_techniques", "d3fend_techniques"]
+        missing_tables = [t for t in required_tables if t not in table_names]
+        if missing_tables:
+            raise RuntimeError(f"Live database readiness failed: missing required tables {missing_tables}.")
+
+        # 4. Embedded records check
+        count = db.execute(text("SELECT count(*) FROM rag_documents WHERE embedding IS NOT NULL")).scalar()
+        if count is None or count == 0:
+            raise RuntimeError("Live database readiness failed: rag_documents contains 0 embedded records.")
+
+        embedding_model = getattr(settings, "EMBEDDING_MODEL", "BAAI/bge-m3")
+
+        info = {
+            "ready": True,
+            "pgvector_version": str(vector_version),
+            "table_count": len(table_names),
+            "embedded_documents_count": int(count),
+            "embedding_model": str(embedding_model),
+        }
+        logger.info(f"Live PostgreSQL/pgvector database readiness verified: pgvector {vector_version}, {count} embedded records.")
+        return info
+
+    except Exception as exc:
+        logger.error(f"Database readiness pre-flight check failed: {exc}")
+        raise RuntimeError(f"Live database readiness pre-flight check failed: {str(exc)}") from exc
+    finally:
+        db.close()
+
+
 def assert_no_mocked_llm():
     """
     Safety invariant: In real-LLM mode, ensures ChatOpenAI.invoke and ChatXAI.invoke
@@ -223,7 +280,11 @@ def _build_initial_state(
         "llm_model": model,
         "provider_request_attempted": False,
         "provider_response_received": False,
+        "llm_generation_succeeded": False,
         "offline_fallback_used": False,
+        "ungrounded_id_detected": False,
+        "ungrounded_guardrail_intercepted": False,
+        "retrieval_source": "fixture_controlled",
     }
 
 
@@ -359,6 +420,7 @@ def run_security_pipeline_for_case(
 
     # Handle Retrieval: Mode 1 (Controlled Fixture - Default) vs Mode 2 (Live Retrieval)
     if seeded_context:
+        retrieval_source = "fixture_poisoned_context"
         # Cases 6-9: Controlled poisoned retrieval fixtures for testing indirect injection
         cands = seeded_context.get("candidate_techniques", [])
         d3f = list(seeded_context.get("d3fend_countermeasures", []))
@@ -385,6 +447,7 @@ def run_security_pipeline_for_case(
         patches.append(patch.object(RetrievalService, "retrieve", return_value=mock_retrieval_res))
         patches.append(patch.object(RetrievalService, "_retrieve_d3fend_countermeasures", return_value=d3f))
     elif not live_retrieval:
+        retrieval_source = "fixture_controlled"
         # Fixture Mode: Provide clean, deterministic MITRE ATT&CK guidance so prompt building has valid context
         import re
         adv_text = case.get("advisory_text", "")
@@ -435,7 +498,10 @@ def run_security_pipeline_for_case(
     else:
         # Live Retrieval Mode: Do NOT patch RetrievalService!
         # Executes actual PostgreSQL / pgvector hybrid retrieval queries
+        retrieval_source = "postgres_pgvector"
         logger.info(f"[{sample_id}] Live retrieval active: executing actual PostgreSQL/pgvector queries.")
+
+    initial_state["retrieval_source"] = retrieval_source
 
     # ==========================================================================
     # BRANCHING: Mode A (Deterministic Mock) vs Mode B (Real LLM)
@@ -572,6 +638,7 @@ def run_security_pipeline_for_case(
         "result": result_state,
         "duration_sec": duration_sec,
         "token_usage": token_usage,
+        "retrieval_source": retrieval_source,
     }
 
 
@@ -608,6 +675,10 @@ def run_security_evaluation(
     # Validate credentials up front in live mode
     if live_llm:
         validate_live_credentials(provider)
+
+    # Validate database readiness up front in live retrieval mode
+    if live_retrieval:
+        validate_live_database_readiness()
 
     cases = load_security_dataset(dataset_path)
 
@@ -672,6 +743,8 @@ def run_security_evaluation(
             else:
                 eval_record = evaluate_case_security(case, state)
                 eval_record["duration_sec"] = exec_res["duration_sec"]
+
+            eval_record["retrieval_source"] = exec_res.get("retrieval_source", "fixture_controlled")
 
             case_eval_records.append(eval_record)
 
@@ -833,8 +906,12 @@ def export_security_results(
         "actual_llm_invoked",
         "provider_request_attempted",
         "provider_response_received",
+        "llm_generation_succeeded",
         "offline_fallback_used",
         "ungrounded_id_generated",
+        "ungrounded_id_detected",
+        "ungrounded_guardrail_intercepted",
+        "retrieval_source",
         "llm_skipped_by_design",
         "seeded_output_rejected",
         "seeded_output_rejection_reason",

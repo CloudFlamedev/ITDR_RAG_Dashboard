@@ -75,7 +75,12 @@ class ThreatAnalysisState(TypedDict, total=False):
     llm_model: Optional[str]
     provider_request_attempted: Optional[bool]
     provider_response_received: Optional[bool]
+    llm_generation_succeeded: Optional[bool]
     offline_fallback_used: Optional[bool]
+
+    # Explicit Ungrounded Detection Telemetry
+    ungrounded_id_detected: Optional[bool]
+    ungrounded_guardrail_intercepted: Optional[bool]
 
     # Safe Evaluation Execution Mode
     evaluation_mode: bool  # When True, skips report persistence and user quota tracking

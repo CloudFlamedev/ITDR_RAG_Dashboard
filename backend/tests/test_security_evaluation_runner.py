@@ -1021,3 +1021,448 @@ def test_live_llm_integration_single_case(monkeypatch):
     assert len(gen_steps) == 1
     assert "groq" in gen_steps[0]["metadata"]["model_provider"].lower()
     assert gen_steps[0]["metadata"]["token_usage"]["total_tokens"] > 0
+
+
+# ==============================================================================
+# 9. Regression Tests: Provider Invalid JSON & Fallback Telemetry (Part 1)
+# ==============================================================================
+
+def test_provider_invalid_json_followed_by_fallback():
+    """
+    Verifies that when a provider returns invalid/unparseable JSON:
+    1. provider_request_attempted = True
+    2. provider_response_received = True
+    3. llm_generation_succeeded = False
+    4. offline_fallback_used = True
+    5. Fallback report is NOT marked verified or COMPLETED.
+    """
+    from app.ai.nodes.generation_nodes import generate_structured_report
+
+    mock_llm_resp = MagicMock()
+    mock_llm_resp.content = "I am an LLM but I refuse to output valid JSON. Here is plain text."
+    mock_llm_resp.response_metadata = {"token_usage": {"prompt_tokens": 10, "completion_tokens": 15, "total_tokens": 25}}
+
+    base_state = {
+        "report_id": "TEST-INVALID-JSON-001",
+        "advisory_text": "T1078 compromised credentials.",
+        "prompt_messages": [MagicMock()],
+        "candidate_techniques": [{"technique_id": "T1078", "name": "Valid Accounts"}],
+        "d3fend_countermeasures": [],
+        "trace_steps": [],
+        "llm_provider": "groq",
+        "evaluation_mode": True,
+    }
+
+    with patch.object(settings, "ITDR_GUARDRAILS_ENABLED", True):
+        with patch.object(settings, "GROQ_API_KEY", "gsk_valid_test_key"):
+            with patch("app.ai.nodes.generation_nodes.ChatOpenAI.invoke", return_value=mock_llm_resp):
+                result = generate_structured_report(base_state)
+
+    assert result["provider_request_attempted"] is True
+    assert result["provider_response_received"] is True
+    assert result["llm_generation_succeeded"] is False
+    assert result["offline_fallback_used"] is True
+    assert result["is_fallback_generation"] is True
+
+    # Generation trace step metadata assertions
+    gen_trace = next(s for s in result["trace_steps"] if s["step_name"] == "generate_structured_report")
+    assert gen_trace["metadata"]["provider_request_attempted"] is True
+    assert gen_trace["metadata"]["provider_response_received"] is True
+    assert gen_trace["metadata"]["llm_generation_succeeded"] is False
+    assert gen_trace["metadata"]["offline_fallback_used"] is True
+
+    # Evaluation metric handling for invalid JSON fallback case
+    case = {
+        "sample_id": "sec-test-inv-json",
+        "case_type": "invalid_json_fallback",
+        "expected_final_status": "PARTIAL",
+        "expected_security_review": False,
+    }
+    state = {
+        **result,
+        "status": "PARTIAL",
+        "output_security_status": "FALLBACK_UNVERIFIED",
+        "structured_report": {"is_verified": False, "is_fallback_generation": True},
+    }
+    eval_rec = evaluate_case_security_live(case, state)
+    assert eval_rec["passed"] is True
+    assert eval_rec["provider_request_attempted"] is True
+    assert eval_rec["provider_response_received"] is True
+    assert eval_rec["llm_generation_succeeded"] is False
+    assert eval_rec["offline_fallback_used"] is True
+    assert eval_rec["generation_status"] == "OFFLINE_FALLBACK"
+
+
+# ==============================================================================
+# 10. Regression Tests: Evidence-Based Ungrounded ID Detection (Part 2)
+# ==============================================================================
+
+def test_ungrounded_detection_model_refusal():
+    """
+    (a) Model Refusal: Real model refused to fabricate unsupported IDs (T9999, D3-FAKE)
+    and generated only valid, grounded techniques.
+    Must be classified as SAFE_REFUSAL and NOT counted as a guardrail detection.
+    Ungrounded detection rate must report N/A.
+    """
+    case = {
+        "sample_id": "sec-ground-001",
+        "case_type": "grounding_unsupported_ids",
+        "expected_output_security_status": "UNGROUNDED",
+        "expected_final_status": "NEEDS_REVIEW",
+        "expected_security_review": True,
+    }
+    state = {
+        "sample_id": "sec-ground-001",
+        "candidate_techniques": [{"technique_id": "T1078", "name": "Valid Accounts"}],
+        "d3fend_countermeasures": [{"d3fend_id": "D3-MFA", "name": "Multi-factor Authentication"}],
+        "structured_report": {
+            "technique_candidates": [{"technique_id": "T1078", "name": "Valid Accounts"}],
+            "defensive_techniques": [{"d3fend_id": "D3-MFA", "name": "Multi-factor Authentication"}],
+            "is_verified": True,
+        },
+        "raw_llm_response": "I identified T1078 based on retrieved evidence.",
+        "output_security_status": "VERIFIED",
+        "status": "COMPLETED",
+        "provider_request_attempted": True,
+        "provider_response_received": True,
+        "llm_generation_succeeded": True,
+        "offline_fallback_used": False,
+        "trace_steps": [{"step_name": "generate_structured_report", "status": "SUCCESS"}],
+    }
+
+    eval_rec = evaluate_case_security_live(case, state)
+    assert eval_rec["response_classification"] == "SAFE_REFUSAL"
+    assert eval_rec["model_refusal"] is True
+    assert eval_rec["ungrounded_id_generated"] is False
+    assert eval_rec["guardrail_interception"] is False
+    assert eval_rec["guardrail_escape"] is False
+
+    # Aggregate metric: with 0 ungrounded generated, rate is None and formatted N/A
+    metrics = aggregate_live_security_metrics([eval_rec])
+    assert metrics["ungrounded_output_detection_rate"]["rate"] is None
+    assert "N/A" in metrics["ungrounded_output_detection_rate"]["formatted"]
+
+
+def test_ungrounded_detection_unsupported_attack_detected():
+    """
+    (b) Unsupported ATT&CK Detected: Model generated hallucinated T9999.
+    Validator flagged UNGROUNDED, is_verified=False, routed to security review.
+    Must be classified as UNGROUNDED_DETECTED.
+    """
+    case = {
+        "sample_id": "sec-ground-001",
+        "case_type": "grounding_unsupported_ids",
+    }
+    state = {
+        "sample_id": "sec-ground-001",
+        "candidate_techniques": [{"technique_id": "T1078", "name": "Valid Accounts"}],
+        "d3fend_countermeasures": [{"d3fend_id": "D3-MFA", "name": "Multi-factor Authentication"}],
+        "unsupported_attack_ids": ["T9999"],
+        "unsupported_d3fend_ids": [],
+        "ungrounded_id_detected": True,
+        "ungrounded_guardrail_intercepted": True,
+        "structured_report": {
+            "technique_candidates": [{"technique_id": "T9999", "name": "Fake Tech"}],
+            "defensive_techniques": [{"d3fend_id": "D3-MFA"}],
+            "is_verified": False,
+        },
+        "raw_llm_response": "Adversary used T9999.",
+        "output_security_status": "UNGROUNDED",
+        "status": "NEEDS_REVIEW",
+        "review_reasons": ["Unsupported technique ID T9999"],
+        "provider_request_attempted": True,
+        "provider_response_received": True,
+        "llm_generation_succeeded": True,
+        "offline_fallback_used": False,
+        "trace_steps": [{"step_name": "generate_structured_report", "status": "SUCCESS"}],
+    }
+
+    eval_rec = evaluate_case_security_live(case, state)
+    assert eval_rec["response_classification"] == "UNGROUNDED_DETECTED"
+    assert eval_rec["ungrounded_id_generated"] is True
+    assert eval_rec["guardrail_interception"] is True
+    assert eval_rec["guardrail_escape"] is False
+
+    metrics = aggregate_live_security_metrics([eval_rec])
+    assert metrics["ungrounded_output_detection_rate"]["numerator"] == 1
+    assert metrics["ungrounded_output_detection_rate"]["denominator"] == 1
+    assert metrics["ungrounded_output_detection_rate"]["rate"] == 1.0
+
+
+def test_ungrounded_detection_unsupported_d3fend_detected():
+    """
+    (c) Unsupported D3FEND Detected: Model generated hallucinated D3-FAKE.
+    Validator flagged UNGROUNDED, is_verified=False, routed to security review.
+    Must be classified as UNGROUNDED_DETECTED.
+    """
+    case = {
+        "sample_id": "sec-ground-001",
+        "case_type": "grounding_unsupported_ids",
+    }
+    state = {
+        "sample_id": "sec-ground-001",
+        "candidate_techniques": [{"technique_id": "T1078"}],
+        "d3fend_countermeasures": [{"d3fend_id": "D3-MFA"}],
+        "unsupported_attack_ids": [],
+        "unsupported_d3fend_ids": ["D3-FAKE"],
+        "ungrounded_id_detected": True,
+        "ungrounded_guardrail_intercepted": True,
+        "structured_report": {
+            "technique_candidates": [{"technique_id": "T1078"}],
+            "defensive_techniques": [{"d3fend_id": "D3-FAKE", "name": "Fake D3"}],
+            "is_verified": False,
+        },
+        "raw_llm_response": "Defend with D3-FAKE.",
+        "output_security_status": "UNGROUNDED",
+        "status": "NEEDS_REVIEW",
+        "review_reasons": ["Unsupported countermeasure D3-FAKE"],
+        "provider_request_attempted": True,
+        "provider_response_received": True,
+        "llm_generation_succeeded": True,
+        "offline_fallback_used": False,
+        "trace_steps": [{"step_name": "generate_structured_report", "status": "SUCCESS"}],
+    }
+
+    eval_rec = evaluate_case_security_live(case, state)
+    assert eval_rec["response_classification"] == "UNGROUNDED_DETECTED"
+    assert eval_rec["ungrounded_id_generated"] is True
+    assert eval_rec["guardrail_interception"] is True
+
+
+def test_ungrounded_generated_but_not_detected_escapes():
+    """
+    (d) Unsupported Generated But NOT Detected: Model generated T9999, but validator
+    missed it and marked output VERIFIED with is_verified=True.
+    Must be classified as UNGROUNDED_ESCAPED and FAIL the evaluation.
+    """
+    case = {
+        "sample_id": "sec-ground-001",
+        "case_type": "grounding_unsupported_ids",
+    }
+    state = {
+        "sample_id": "sec-ground-001",
+        "candidate_techniques": [{"technique_id": "T1078"}],
+        "d3fend_countermeasures": [],
+        "structured_report": {
+            "technique_candidates": [{"technique_id": "T9999", "name": "Hallucinated Tech"}],
+            "is_verified": True,
+        },
+        "raw_llm_response": "Adversary used T9999.",
+        "output_security_status": "VERIFIED",
+        "status": "COMPLETED",
+        "provider_request_attempted": True,
+        "provider_response_received": True,
+        "llm_generation_succeeded": True,
+        "offline_fallback_used": False,
+        "trace_steps": [{"step_name": "generate_structured_report", "status": "SUCCESS"}],
+    }
+
+    eval_rec = evaluate_case_security_live(case, state)
+    assert eval_rec["passed"] is False
+    assert eval_rec["response_classification"] == "UNGROUNDED_ESCAPED"
+    assert eval_rec["guardrail_escape"] is True
+    assert eval_rec["guardrail_interception"] is False
+
+
+def test_ungrounded_detected_but_not_intercepted_escapes():
+    """
+    (e) Unsupported Detected But NOT Intercepted: Validator detected T9999, but pipeline
+    did not route to security review and falsely marked is_verified=True.
+    Must be classified as UNGROUNDED_ESCAPED and FAIL the evaluation.
+    """
+    case = {
+        "sample_id": "sec-ground-001",
+        "case_type": "grounding_unsupported_ids",
+    }
+    state = {
+        "sample_id": "sec-ground-001",
+        "candidate_techniques": [{"technique_id": "T1078"}],
+        "d3fend_countermeasures": [],
+        "unsupported_attack_ids": ["T9999"],
+        "ungrounded_id_detected": True,
+        "ungrounded_guardrail_intercepted": False,
+        "structured_report": {
+            "technique_candidates": [{"technique_id": "T9999"}],
+            "is_verified": True,  # Falsely marked verified
+        },
+        "raw_llm_response": "Adversary used T9999.",
+        "output_security_status": "UNGROUNDED",
+        "status": "COMPLETED",  # Falsely completed without review
+        "provider_request_attempted": True,
+        "provider_response_received": True,
+        "llm_generation_succeeded": True,
+        "offline_fallback_used": False,
+        "trace_steps": [{"step_name": "generate_structured_report", "status": "SUCCESS"}],
+    }
+
+    eval_rec = evaluate_case_security_live(case, state)
+    assert eval_rec["passed"] is False
+    assert eval_rec["response_classification"] == "UNGROUNDED_ESCAPED"
+    assert eval_rec["guardrail_escape"] is True
+
+
+def test_unverified_unrelated_reason_not_counted_as_ungrounded():
+    """
+    (f) Unverified for Unrelated Reason: Secret leak scenario where report is unverified
+    due to secret disclosure, but no unsupported IDs were generated.
+    Must NOT be counted in ungrounded output detection numerator or denominator.
+    """
+    case = {
+        "sample_id": "sec-unsafe-001",
+        "case_type": "unsafe_output_secret_leak",
+    }
+    state = {
+        "sample_id": "sec-unsafe-001",
+        "candidate_techniques": [{"technique_id": "T1078"}],
+        "d3fend_countermeasures": [],
+        "structured_report": {
+            "technique_candidates": [{"technique_id": "T1078"}],
+            "uncertainties": ["gsk_canary_test_token_9876543210abcdef"],
+            "is_verified": False,
+        },
+        "raw_llm_response": "Token: gsk_canary_test_token_9876543210abcdef",
+        "output_security_status": "UNSAFE",
+        "status": "NEEDS_REVIEW",
+        "provider_request_attempted": True,
+        "provider_response_received": True,
+        "llm_generation_succeeded": True,
+        "offline_fallback_used": False,
+        "trace_steps": [{"step_name": "generate_structured_report", "status": "SUCCESS"}],
+    }
+
+    eval_rec = evaluate_case_security_live(case, state)
+    assert eval_rec["ungrounded_id_generated"] is False
+
+    # Aggregate with only this case: ungrounded metrics report N/A
+    metrics = aggregate_live_security_metrics([eval_rec])
+    assert metrics["ungrounded_output_detection_rate"]["denominator"] == 0
+    assert metrics["ungrounded_output_detection_rate"]["rate"] is None
+    assert "N/A" in metrics["ungrounded_output_detection_rate"]["formatted"]
+
+
+# ==============================================================================
+# 11. Unit & Regression Tests for Retrieval Metrics (Part 3 & 4)
+# ==============================================================================
+
+def test_compute_hit_rate_at_k():
+    """Verifies Hit Rate@K computation across hits, misses, subtechniques, and edge cases."""
+    from evaluation.retrieval_metrics import compute_hit_rate_at_k
+
+    # Exact match hit
+    assert compute_hit_rate_at_k(["T1003.001", "T1078"], ["T1003.001"], k=5) == 1.0
+
+    # Subtechnique match hit
+    assert compute_hit_rate_at_k(["T1003", "T1078"], ["T1003.001"], k=5) == 1.0
+    assert compute_hit_rate_at_k(["T1078.004"], ["T1078"], k=5) == 1.0
+
+    # Miss (no expected technique in top K)
+    assert compute_hit_rate_at_k(["T1059", "T1078"], ["T1003.001"], k=5) == 0.0
+
+    # K cutoff boundary: relevant item at rank 3 with k=2 -> 0.0; with k=3 -> 1.0
+    assert compute_hit_rate_at_k(["T1059", "T1078", "T1003.001"], ["T1003.001"], k=2) == 0.0
+    assert compute_hit_rate_at_k(["T1059", "T1078", "T1003.001"], ["T1003.001"], k=3) == 1.0
+
+    # Edge cases
+    assert compute_hit_rate_at_k([], [], k=5) == 1.0
+    assert compute_hit_rate_at_k(["T1078"], [], k=5) == 0.0
+    assert compute_hit_rate_at_k([], ["T1078"], k=5) == 0.0
+
+
+def test_compute_mrr():
+    """Verifies Mean Reciprocal Rank (MRR) computation across rank positions and edge cases."""
+    from evaluation.retrieval_metrics import compute_mrr
+
+    # Rank 1 -> 1.0
+    assert compute_mrr(["T1003.001", "T1078"], ["T1003.001"], k=5) == 1.0
+
+    # Rank 2 -> 0.5
+    assert compute_mrr(["T1078", "T1003.001"], ["T1003.001"], k=5) == 0.5
+
+    # Rank 4 -> 0.25
+    assert compute_mrr(["T1", "T2", "T3", "T1003.001"], ["T1003.001"], k=5) == 0.25
+
+    # Rank 5 -> 0.20
+    assert compute_mrr(["T1", "T2", "T3", "T4", "T1003.001"], ["T1003.001"], k=5) == 0.20
+
+    # Rank 6 (beyond k=5) -> 0.0
+    assert compute_mrr(["T1", "T2", "T3", "T4", "T5", "T1003.001"], ["T1003.001"], k=5) == 0.0
+
+    # Edge cases
+    assert compute_mrr([], [], k=5) == 1.0
+    assert compute_mrr(["T1078"], [], k=5) == 0.0
+    assert compute_mrr([], ["T1078"], k=5) == 0.0
+
+
+def test_evaluate_case_retrieval_and_aggregate():
+    """Verifies evaluate_case_retrieval and aggregate_retrieval_metrics functionality."""
+    from evaluation.retrieval_metrics import evaluate_case_retrieval, aggregate_retrieval_metrics
+
+    # Case 1: Perfect retrieval
+    c1 = evaluate_case_retrieval(
+        retrieved_attack_ids=["T1003.001", "T1078"],
+        expected_attack_ids=["T1003.001"],
+        retrieved_d3fend_ids=["D3-HR", "D3-SCF"],
+        expected_d3fend_ids=["D3-HR"],
+        k=5,
+        duration_ms=250.0,
+    )
+    assert c1["attack_hit_rate_at_k"] == 1.0
+    assert c1["attack_mrr"] == 1.0
+    assert c1["attack_recall_at_k"] == 1.0
+    assert c1["duration_ms"] == 250.0
+    assert c1["is_empty_retrieval"] is False
+    assert c1["has_error"] is False
+
+    # Case 2: Partial retrieval (rank 2)
+    c2 = evaluate_case_retrieval(
+        retrieved_attack_ids=["T1059", "T1098.001"],
+        expected_attack_ids=["T1098.001"],
+        retrieved_d3fend_ids=["D3-MFA"],
+        expected_d3fend_ids=["D3-MFA", "D3-CCSA"],
+        k=5,
+        duration_ms=350.0,
+    )
+    assert c2["attack_hit_rate_at_k"] == 1.0
+    assert c2["attack_mrr"] == 0.5
+    assert c2["d3fend_recall_at_k"] == 0.5
+
+    # Case 3: Empty query (negative)
+    c3 = evaluate_case_retrieval(
+        retrieved_attack_ids=[],
+        expected_attack_ids=[],
+        retrieved_d3fend_ids=[],
+        expected_d3fend_ids=[],
+        k=5,
+        duration_ms=100.0,
+    )
+    assert c3["is_empty_retrieval"] is True
+
+    # Aggregation
+    cases = [
+        {**c1, "sample_id": "r1", "query_type": "explicit_id"},
+        {**c2, "sample_id": "r2", "query_type": "semantic"},
+        {**c3, "sample_id": "r3", "query_type": "negative"},
+    ]
+    agg = aggregate_retrieval_metrics(cases)
+    assert agg["total_cases"] == 3
+    assert agg["combined"]["error_rate"] == 0.0
+    assert agg["combined"]["mean_latency_ms"] > 0.0
+    assert "explicit_id_queries" in agg
+    assert "semantic_queries" in agg
+    assert "negative_queries" in agg
+
+
+def test_validate_live_database_readiness_preflight():
+    """Verifies that validate_live_database_readiness verifies connection and tables without throwing."""
+    from evaluation.run_security_evaluation import validate_live_database_readiness
+
+    try:
+        info = validate_live_database_readiness()
+        assert info["ready"] is True
+        assert info["table_count"] > 0
+        assert info["embedded_documents_count"] > 0
+        assert "pgvector_version" in info
+    except Exception as exc:
+        # If running in environment without live DB, verify fail-closed exception message format
+        assert "Live database readiness" in str(exc)
+

@@ -278,7 +278,7 @@ class RetrievalService:
                     "d3fend_countermeasures_count": len(defensive_countermeasures),
                     "highest_vector_similarity": round(highest_vector_score, 4),
                     "highest_rerank_score": round(highest_rerank_score, 4) if highest_rerank_score is not None else None,
-                    "highest_confidence": round(highest_score, 4),
+                    "highest_confidence": round(highest_confidence, 4),
                     "avg_vector_score": avg_vector_score,
                     "insufficient_evidence": insufficient_evidence,
                 },

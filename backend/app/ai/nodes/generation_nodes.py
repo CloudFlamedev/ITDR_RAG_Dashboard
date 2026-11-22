@@ -183,6 +183,7 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
 
     provider_request_attempted = False
     provider_response_received = False
+    llm_generation_succeeded = False
     offline_fallback_used = False
     token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     used_model = configured_model
@@ -221,10 +222,23 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                             max_retries=0,
                         )
 
-                    lc_messages = [
-                        SystemMessage(content=messages[0]["content"]),
-                        HumanMessage(content=messages[1]["content"]),
-                    ]
+                    lc_messages = []
+                    for m in messages:
+                        if isinstance(m, dict):
+                            r = m.get("role", "user")
+                            c = m.get("content", "")
+                            if r == "system":
+                                lc_messages.append(SystemMessage(content=c))
+                            else:
+                                lc_messages.append(HumanMessage(content=c))
+                        elif isinstance(m, (SystemMessage, HumanMessage)):
+                            lc_messages.append(m)
+                        else:
+                            c = getattr(m, "content", str(m))
+                            lc_messages.append(HumanMessage(content=c))
+                    if not lc_messages:
+                        lc_messages = [HumanMessage(content=state.get("advisory_text") or "ITDR threat analysis")]
+
                     provider_request_attempted = True
                     response = llm.invoke(lc_messages, config={"callbacks": [CallbackHandler()]})
                     content = (response.content or "").strip()
@@ -294,15 +308,20 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
             if not isinstance(report_dict, dict):
                 raise ValueError("Could not parse valid JSON dictionary from LLM response")
 
+            llm_generation_succeeded = True
+            offline_fallback_used = False
+
         except Exception as e:
             logger.warning(f"LLM call to {selected_provider} failed or timed out ({e}); falling back to grounded synthesis.")
             offline_fallback_used = True
+            llm_generation_succeeded = False
             model_provider = f"{'Groq' if selected_provider == 'groq' else 'xAI Grok'} (Fallback Synthesis - API Error/Quota)"
             raw_response = f"{selected_provider.upper()} API invocation encountered: {str(e)}"
             report_dict = _synthesize_grounded_report(state, note=f"Generated via grounded synthesis due to {selected_provider} provider error: {str(e)}")
     else:
         # Grounded synthesis without calling external paid API
         offline_fallback_used = True
+        llm_generation_succeeded = False
         model_provider = "Grok Engine (Offline Grounded Synthesis)"
         report_dict = _synthesize_grounded_report(state, note="Generated using authoritative retrieved context (API key not configured in environment)")
         raw_response = json.dumps(report_dict, indent=2)
@@ -325,6 +344,7 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
             "is_fallback_generation": is_fallback,
             "provider_request_attempted": provider_request_attempted,
             "provider_response_received": provider_response_received,
+            "llm_generation_succeeded": llm_generation_succeeded,
             "offline_fallback_used": offline_fallback_used,
             "has_raw_response": bool(raw_response),
             "token_usage": token_usage,
@@ -343,6 +363,7 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                 "is_fallback_generation": is_fallback,
                 "provider_request_attempted": provider_request_attempted,
                 "provider_response_received": provider_response_received,
+                "llm_generation_succeeded": llm_generation_succeeded,
                 "offline_fallback_used": offline_fallback_used,
                 "report_id": state.get("report_id"),
                 "duration_ms": round((time.perf_counter() - start) * 1000, 2),
@@ -359,6 +380,7 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
         "token_usage": token_usage,
         "provider_request_attempted": provider_request_attempted,
         "provider_response_received": provider_response_received,
+        "llm_generation_succeeded": llm_generation_succeeded,
         "offline_fallback_used": offline_fallback_used,
         "llm_provider": selected_provider,
         "llm_model": model_name,
