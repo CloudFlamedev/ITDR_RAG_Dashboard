@@ -55,6 +55,20 @@ class Settings(BaseSettings):
     JINA_RERANK_BASE: str = Field(default="https://api.jina.ai/v1/rerank", description="Jina AI Reranker API endpoint")
     RERANK_ENABLED: bool = Field(default=True, description="Enable cross-encoder reranking before LLM context generation")
 
+    # Retrieval Relevance & Evidence Thresholds
+    RETRIEVAL_MIN_SIMILARITY_THRESHOLD: float = Field(
+        default=0.55,
+        description="Minimum cosine similarity score required for ATT&CK candidate retrieval"
+    )
+    RETRIEVAL_MIN_D3FEND_SCORE: float = Field(
+        default=0.35,
+        description="Minimum similarity score required for D3FEND countermeasure semantic retrieval"
+    )
+    RETRIEVAL_MIN_RERANK_THRESHOLD: float = Field(
+        default=0.20,
+        description="Minimum cross-encoder rerank score required when reranking is applied"
+    )
+
     # Hugging Face Inference API Configuration
     HF_TOKEN: Optional[str] = Field(default=None, description="Hugging Face API token with inference provider access")
     HF_EMBEDDING_MODEL: str = Field(default="BAAI/bge-small-en-v1.5", description="Hugging Face embedding model")

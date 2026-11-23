@@ -272,6 +272,30 @@ if is_sqlite:
                 )
                 _init_session.add(rag_doc)
 
+            if not _init_session.query(RagDocument).filter(RagDocument.chunk_id == "chunk-test-t1558").first():
+                try:
+                    from app.services.embedding_service import EmbeddingService
+                    emb_svc = EmbeddingService()
+                    t1558_vec = emb_svc.embed_query("Kerberos ticket abuse and credential dumping. Steal or Forge Kerberos Tickets.")
+                except Exception:
+                    t1558_vec = [0.1] * 384
+                rag_doc_1558 = RagDocument(
+                    chunk_id="chunk-test-t1558",
+                    source_kind="attack",
+                    document_type="technique",
+                    source_object_id="attack-pattern--t1558",
+                    external_id="T1558",
+                    title="Steal or Forge Kerberos Tickets",
+                    content="Adversaries may request Kerberos service tickets to extract credentials or forge ticket granting tickets.",
+                    url="https://attack.mitre.org/techniques/T1558",
+                    version="1.0",
+                    metadata_json={},
+                    content_hash="test-hash-t1558",
+                    embedding_model="jina-embeddings-v5-text-small",
+                    embedding=t1558_vec,
+                )
+                _init_session.add(rag_doc_1558)
+
             _init_session.commit()
 
         # Seed demo data for tests requiring detection rules, threat feeds, and scenarios

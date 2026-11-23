@@ -185,6 +185,8 @@ class VectorStoreService:
 
         if self._has_pgvector:
             # Native Neon pgvector cosine distance operator
+            if min_score > 0.0:
+                base_query = base_query.filter(RagDocument.embedding.cosine_distance(query_vec) <= (1.0 - min_score))
             results = (
                 base_query
                 .order_by(RagDocument.embedding.cosine_distance(query_vec))
