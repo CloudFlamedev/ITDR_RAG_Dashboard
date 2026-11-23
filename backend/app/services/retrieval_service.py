@@ -10,8 +10,10 @@ from app.models.rag import RagDocument
 from app.services.vector_store_service import VectorStoreService
 from app.services.rerank_service import RerankService
 from app.core.telemetry import observe, langfuse_client, mask_sensitive_data
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 ATTACK_ID_PATTERN = re.compile(r"\b(T\d{4}(?:\.\d{3})?)\b", re.IGNORECASE)
 D3FEND_ID_PATTERN = re.compile(r"\b(D3(?:A)?-[A-Z0-9]+)\b", re.IGNORECASE)
@@ -126,6 +128,36 @@ class RetrievalService:
         entry = _TECH_TAXONOMY_CACHE.get(tech_id)
         if not entry and "." in tech_id:
             entry = _TECH_TAXONOMY_CACHE.get(tech_id.split(".")[0])
+
+        if not entry and self.db:
+            try:
+                t = (
+                    self.db.query(AttackTechnique)
+                    .options(selectinload(AttackTechnique.tactics))
+                    .filter(AttackTechnique.technique_id == tech_id)
+                    .first()
+                )
+                if not t and "." in tech_id:
+                    t = (
+                        self.db.query(AttackTechnique)
+                        .options(selectinload(AttackTechnique.tactics))
+                        .filter(AttackTechnique.technique_id == tech_id.split(".")[0])
+                        .first()
+                    )
+                if t:
+                    entry = {
+                        "id": t.id,
+                        "technique_id": t.technique_id,
+                        "name": t.name,
+                        "tactics": [tac.name for tac in t.tactics],
+                        "url": t.url,
+                        "description": t.description or "",
+                    }
+                    with _tech_cache_lock:
+                        _TECH_TAXONOMY_CACHE[t.technique_id] = entry
+            except Exception as e:
+                logger.debug(f"Direct DB technique lookup failed: {e}")
+
         return entry
 
     @observe(as_type="span", name="hybrid_retrieval_pipeline")
@@ -134,12 +166,24 @@ class RetrievalService:
         advisory_text: str,
         max_candidates: int = 8,
         include_d3fend: bool = True,
-        min_similarity_threshold: float = 0.20,
+        min_similarity_threshold: Optional[float] = None,
+        min_rerank_threshold: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Execute full hybrid retrieval pipeline.
         Returns candidate ATT&CK techniques with grounded evidence and relevant D3FEND countermeasures.
         """
+        effective_min_sim = (
+            min_similarity_threshold
+            if min_similarity_threshold is not None
+            else settings.RETRIEVAL_MIN_SIMILARITY_THRESHOLD
+        )
+        effective_min_rerank = (
+            min_rerank_threshold
+            if min_rerank_threshold is not None
+            else settings.RETRIEVAL_MIN_RERANK_THRESHOLD
+        )
+
         extracted = self.extract_explicit_entities(advisory_text)
         explicit_attack_ids = extracted["attack_ids"]
         explicit_d3fend_ids = extracted["d3fend_ids"]
@@ -191,9 +235,13 @@ class RetrievalService:
                 query=advisory_text,
                 top_k=max_candidates * 3,
                 source_kind="attack",
+                min_score=effective_min_sim,
             )
 
         for doc, score in vector_results:
+            if score < effective_min_sim:
+                continue
+
             tech_id = doc.external_id
             tech_rec = self._get_technique_dict(tech_id)
             if not tech_rec:
@@ -228,7 +276,6 @@ class RetrievalService:
                 })
 
         # 3. Cross-Encoder Reranking
-        # Re-score candidates using Jina AI's multilingual cross-encoder reranker
         raw_candidates = list(candidates_by_id.values())
         ranked_candidates, rerank_meta = self.rerank_service.rerank_candidates(
             query=advisory_text,
@@ -236,16 +283,14 @@ class RetrievalService:
             top_n=max_candidates,
         )
 
-        # 4. Retrieve D3FEND Defensive Knowledge
-        defensive_countermeasures = []
-        if include_d3fend:
-            defensive_countermeasures = self._retrieve_d3fend_countermeasures(
-                query_text=advisory_text,
-                candidate_technique_ids=[c.technique_id for c in ranked_candidates],
-                explicit_d3fend_ids=explicit_d3fend_ids,
-            )
+        if rerank_meta.get("rerank_performed"):
+            filtered_ranked = []
+            for c in ranked_candidates:
+                if c.is_exact_match or (c.rerank_score is not None and c.rerank_score >= effective_min_rerank):
+                    filtered_ranked.append(c)
+            ranked_candidates = filtered_ranked
 
-        # 5. Check confidence / sufficiency & preserve separate score types
+        # 4. Check confidence / sufficiency & preserve separate score types
         highest_vector_score = max((c.vector_score for c in raw_candidates), default=0.0)
         rerank_scores = [c.rerank_score for c in ranked_candidates if c.rerank_score is not None]
         highest_rerank_score = max(rerank_scores, default=None) if (rerank_meta.get("rerank_performed") and rerank_scores) else None
@@ -257,10 +302,28 @@ class RetrievalService:
 
         # Calibrated vector similarity score used for cosine-based evidence threshold
         # (CRITICAL: Never compare Jina cross-encoder relevance scores against cosine similarity threshold)
-        insufficient_evidence = (highest_vector_score < min_similarity_threshold and not explicit_attack_ids)
+        insufficient_evidence = (highest_vector_score < effective_min_sim and not explicit_attack_ids)
+
+        if insufficient_evidence:
+            ranked_candidates = []
+
+        # 5. Retrieve D3FEND Defensive Knowledge
+        defensive_countermeasures = []
+        if include_d3fend and not insufficient_evidence:
+            defensive_countermeasures = self._retrieve_d3fend_countermeasures(
+                query_text=advisory_text,
+                candidate_technique_ids=[c.technique_id for c in ranked_candidates],
+                explicit_d3fend_ids=explicit_d3fend_ids,
+            )
+        elif include_d3fend and explicit_d3fend_ids:
+            defensive_countermeasures = self._retrieve_d3fend_countermeasures(
+                query_text=advisory_text,
+                candidate_technique_ids=[],
+                explicit_d3fend_ids=explicit_d3fend_ids,
+            )
 
         # Vector score distribution metrics for drift detection
-        vector_scores = [c.vector_score for c in raw_candidates]
+        vector_scores = [c.vector_score for c in ranked_candidates]
         avg_vector_score = round(sum(vector_scores) / max(len(vector_scores), 1), 4)
 
         try:
@@ -269,7 +332,8 @@ class RetrievalService:
                     "advisory_text": mask_sensitive_data(advisory_text[:500]),
                     "max_candidates": max_candidates,
                     "include_d3fend": include_d3fend,
-                    "min_similarity_threshold": min_similarity_threshold,
+                    "min_similarity_threshold": effective_min_sim,
+                    "min_rerank_threshold": effective_min_rerank,
                     "query_type": "explicit_id" if explicit_attack_ids else "natural_language",
                 },
                 output={
@@ -278,7 +342,7 @@ class RetrievalService:
                     "d3fend_countermeasures_count": len(defensive_countermeasures),
                     "highest_vector_similarity": round(highest_vector_score, 4),
                     "highest_rerank_score": round(highest_rerank_score, 4) if highest_rerank_score is not None else None,
-                    "highest_confidence": round(highest_score, 4),
+                    "highest_confidence": round(highest_confidence, 4),
                     "avg_vector_score": avg_vector_score,
                     "insufficient_evidence": insufficient_evidence,
                 },
@@ -313,9 +377,21 @@ class RetrievalService:
         query_text: str,
         candidate_technique_ids: List[str],
         explicit_d3fend_ids: List[str],
+        min_d3fend_score: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         if not self.db:
             return []
+
+        # If no identified attack techniques and no explicit D3FEND indicator,
+        # there is no defensive context to retrieve.
+        if not candidate_technique_ids and not explicit_d3fend_ids:
+            return []
+
+        effective_min_d3f = (
+            min_d3fend_score
+            if min_d3fend_score is not None
+            else settings.RETRIEVAL_MIN_D3FEND_SCORE
+        )
 
         countermeasures = []
         seen_d3f_ids = set()
@@ -372,7 +448,7 @@ class RetrievalService:
                     })
 
         # C. Concept & Keyword matching for identity threat domains
-        if len(countermeasures) < 6:
+        if len(countermeasures) < 6 and candidate_technique_ids:
             lower_query = query_text.lower()
             key_concepts = [
                 ("certificate", ["certificate", "ad cs", "esc1", "esc", "pki", "san"]),
@@ -406,15 +482,17 @@ class RetrievalService:
                         break
 
         # D. Semantic vector search over D3FEND documents
-        if len(countermeasures) < 8:
+        if len(countermeasures) < 8 and self.vector_store and (candidate_technique_ids or explicit_d3fend_ids):
             d3f_vector_results = self.vector_store.similarity_search(
                 query=query_text[:300],
                 top_k=5,
                 source_kind="d3fend",
-                min_score=0.01,
+                min_score=effective_min_d3f,
             )
 
             for doc, score in d3f_vector_results:
+                if score < effective_min_d3f:
+                    continue
                 d3f_id = doc.external_id
                 if d3f_id not in seen_d3f_ids:
                     seen_d3f_ids.add(d3f_id)

@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     GROQ_API_KEY_NEW_FOR_TESTING: Optional[str] = Field(default=None, description="Testing Groq API key for CI/evaluation")
     GROQ_API_BASE: str = Field(default="https://api.groq.com/openai/v1", description="Groq API base URL")
     GROQ_MODEL: str = Field(default="openai/gpt-oss-120b", description="Default Groq model")
+    LLM_PROVIDER: Optional[str] = Field(
+        default=None,
+        description="Explicit LLM provider override: 'groq' or 'xai'. When None, uses credential auto-detection."
+    )
 
     # Jina AI Embeddings & Reranker Configuration
     JINA_API_KEY: Optional[str] = Field(default=None, description="Jina AI API key for embeddings and reranker")
@@ -50,6 +54,20 @@ class Settings(BaseSettings):
     JINA_RERANK_MODEL: str = Field(default="jina-reranker-v2-base-multilingual", description="Jina AI Reranker model")
     JINA_RERANK_BASE: str = Field(default="https://api.jina.ai/v1/rerank", description="Jina AI Reranker API endpoint")
     RERANK_ENABLED: bool = Field(default=True, description="Enable cross-encoder reranking before LLM context generation")
+
+    # Retrieval Relevance & Evidence Thresholds
+    RETRIEVAL_MIN_SIMILARITY_THRESHOLD: float = Field(
+        default=0.55,
+        description="Minimum cosine similarity score required for ATT&CK candidate retrieval"
+    )
+    RETRIEVAL_MIN_D3FEND_SCORE: float = Field(
+        default=0.35,
+        description="Minimum similarity score required for D3FEND countermeasure semantic retrieval"
+    )
+    RETRIEVAL_MIN_RERANK_THRESHOLD: float = Field(
+        default=0.20,
+        description="Minimum cross-encoder rerank score required when reranking is applied"
+    )
 
     # Hugging Face Inference API Configuration
     HF_TOKEN: Optional[str] = Field(default=None, description="Hugging Face API token with inference provider access")
@@ -155,6 +173,38 @@ class Settings(BaseSettings):
     LANGFUSE_HOST: Optional[str] = Field(default=None, description="Langfuse Host URL alias")
     LANGFUSE_ENABLED: bool = Field(default=True, description="Enable Langfuse observability layer")
 
+    # AI Security Guardrails Configuration
+    ITDR_GUARDRAILS_ENABLED: bool = Field(default=True, description="Enable AI security guardrails")
+    ITDR_GUARDRAIL_MODE: str = Field(
+        default="monitor",
+        description="Guardrail operational mode: 'monitor' (detect & log warnings) or 'enforce' (quarantine/block high-risk)"
+    )
+    GUARDRAIL_INPUT_RISK_THRESHOLD: float = Field(
+        default=0.75,
+        description="Confidence threshold above which direct injection triggers security review in enforce mode"
+    )
+    GUARDRAIL_CONTEXT_RISK_THRESHOLD: float = Field(
+        default=0.70,
+        description="Confidence threshold above which retrieved document is quarantined in enforce mode"
+    )
+    GUARDRAIL_OUTPUT_RISK_THRESHOLD: float = Field(
+        default=0.75,
+        description="Confidence threshold above which generated output triggers security review in enforce mode"
+    )
+    GUARDRAIL_CLASSIFIER_PROVIDER: str = Field(
+        default="rule_heuristic",
+        description="Classifier provider: 'rule_heuristic' or custom modular classifier"
+    )
+    GUARDRAIL_CLASSIFIER_TIMEOUT_SECONDS: int = Field(
+        default=5,
+        description="Timeout for guardrail classifier calls"
+    )
+
+    @property
+    def guardrails_enforce(self) -> bool:
+        """Returns True if guardrails are actively in enforce mode."""
+        return self.ITDR_GUARDRAILS_ENABLED and self.ITDR_GUARDRAIL_MODE.strip().lower() == "enforce"
+
     @property
     def cors_origins(self) -> list[str]:
         """Returns parsed list of allowed CORS origins, automatically including FRONTEND_URL."""
@@ -179,8 +229,34 @@ class Settings(BaseSettings):
         return "neon.tech" in self.DATABASE_URL or "sslmode=require" in self.DATABASE_URL
 
     @property
+    def effective_llm_provider(self) -> str:
+        """Returns the active provider name: 'groq' or 'xai'."""
+        if self.LLM_PROVIDER and self.LLM_PROVIDER.strip().lower() in ("groq", "xai"):
+            return self.LLM_PROVIDER.strip().lower()
+        if self.is_groq:
+            return "groq"
+        return "xai"
+
+    @property
     def effective_llm_key(self) -> Optional[str]:
-        """Returns active LLM key, prioritizing GROQ_API_KEY_NEW_FOR_TESTING, GROQ_API_KEY, or XAI_API_KEY."""
+        """
+        Returns active LLM key.
+        If LLM_PROVIDER is explicitly 'xai', returns XAI_API_KEY.
+        If LLM_PROVIDER is explicitly 'groq', returns GROQ_API_KEY_NEW_FOR_TESTING or GROQ_API_KEY.
+        Otherwise prioritizes GROQ_API_KEY_NEW_FOR_TESTING, GROQ_API_KEY, or XAI_API_KEY.
+        """
+        if self.LLM_PROVIDER:
+            prov = self.LLM_PROVIDER.strip().lower()
+            if prov == "xai":
+                if self.XAI_API_KEY and not self.XAI_API_KEY.startswith("replace-") and self.XAI_API_KEY.strip():
+                    return self.XAI_API_KEY.strip()
+                return None
+            elif prov == "groq":
+                for key in (self.GROQ_API_KEY_NEW_FOR_TESTING, self.GROQ_API_KEY):
+                    if key and not key.startswith("replace-") and key.strip():
+                        return key.strip()
+                return None
+
         for key in (self.GROQ_API_KEY_NEW_FOR_TESTING, self.GROQ_API_KEY, self.XAI_API_KEY):
             if key and not key.startswith("replace-") and not key.strip() == "":
                 return key.strip()
@@ -189,22 +265,45 @@ class Settings(BaseSettings):
     @property
     def is_groq(self) -> bool:
         """Returns True if the active provider is Groq."""
+        if self.LLM_PROVIDER and self.LLM_PROVIDER.strip().lower() in ("groq", "xai"):
+            return self.LLM_PROVIDER.strip().lower() == "groq"
         key = self.effective_llm_key or ""
         base = self.effective_llm_base or ""
-        return "groq" in base.lower() or key.startswith("gsk_")
+        if (self.GROQ_API_KEY_NEW_FOR_TESTING and key == self.GROQ_API_KEY_NEW_FOR_TESTING.strip()) or \
+           (self.GROQ_API_KEY and key == self.GROQ_API_KEY.strip()):
+            return True
+        return "groq" in base.lower() or key.startswith("gsk_") or "groq" in key.lower()
 
     @property
     def effective_llm_base(self) -> str:
         """Returns API base URL for LLM calls."""
+        if self.LLM_PROVIDER:
+            prov = self.LLM_PROVIDER.strip().lower()
+            if prov == "xai":
+                return self.XAI_API_BASE or "https://api.x.ai/v1"
+            elif prov == "groq":
+                return self.GROQ_API_BASE or "https://api.groq.com/openai/v1"
+
         key = self.effective_llm_key or ""
-        if key.startswith("gsk_") or "groq" in self.XAI_API_BASE.lower():
-            return "https://api.groq.com/openai/v1"
+        if (self.GROQ_API_KEY_NEW_FOR_TESTING and key == self.GROQ_API_KEY_NEW_FOR_TESTING.strip()) or \
+           (self.GROQ_API_KEY and key == self.GROQ_API_KEY.strip()) or \
+           key.startswith("gsk_") or "groq" in key.lower() or "groq" in self.XAI_API_BASE.lower():
+            return self.GROQ_API_BASE or "https://api.groq.com/openai/v1"
         return self.XAI_API_BASE or "https://api.x.ai/v1"
 
     @property
     def effective_llm_model(self) -> str:
         """Returns model name for LLM calls."""
-        return self.XAI_MODEL or self.GROQ_MODEL or "grok-4.7"
+        if self.LLM_PROVIDER:
+            prov = self.LLM_PROVIDER.strip().lower()
+            if prov == "xai":
+                return self.XAI_MODEL or "grok-4.7"
+            elif prov == "groq":
+                return self.GROQ_MODEL or "openai/gpt-oss-120b"
+
+        if self.is_groq:
+            return self.GROQ_MODEL or "openai/gpt-oss-120b"
+        return self.XAI_MODEL or "grok-4.7"
 
     @property
     def is_production(self) -> bool:

@@ -18,6 +18,35 @@ from app.models.d3fend import D3fendTechnique
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# Ensure backwards-compatibility for langchain-xai with BaseChatOpenAI across langchain versions
+try:
+    from pydantic.fields import ModelPrivateAttr
+    try:
+        from langchain_openai.chat_models.base import BaseChatOpenAI
+        if hasattr(BaseChatOpenAI, "__private_attributes__") and "_langsmith_gateway_headers" not in BaseChatOpenAI.__private_attributes__:
+            BaseChatOpenAI.__private_attributes__["_langsmith_gateway_headers"] = ModelPrivateAttr(default=None)
+    except Exception:
+        pass
+
+    try:
+        from langchain_xai import ChatXAI
+        if hasattr(ChatXAI, "__private_attributes__") and "_langsmith_gateway_headers" not in ChatXAI.__private_attributes__:
+            ChatXAI.__private_attributes__["_langsmith_gateway_headers"] = ModelPrivateAttr(default=None)
+    except Exception:
+        pass
+except Exception:
+    pass
+
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:
+    ChatOpenAI = None
+
+try:
+    from langchain_xai import ChatXAI
+except ImportError:
+    ChatXAI = None
+
 _authoritative_attack_ids: Optional[Set[str]] = None
 _authoritative_d3fend_ids: Optional[Set[str]] = None
 _taxonomy_lock = threading.Lock()
@@ -118,50 +147,99 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
 
     raw_response = None
     report_dict = None
-    model_provider = "xAI Grok"
-    model_name = settings.XAI_MODEL
 
-    if settings.has_xai_key:
+    # Explicit provider selection: state > settings.LLM_PROVIDER > auto-detect
+    explicit_provider = state.get("llm_provider") or getattr(settings, "LLM_PROVIDER", None)
+    if explicit_provider:
+        selected_provider = explicit_provider.strip().lower()
+    elif settings.is_groq:
+        selected_provider = "groq"
+    else:
+        selected_provider = "xai"
+
+    # Resolve active credentials, base URL, and candidate models for selected provider
+    if selected_provider == "groq":
+        active_key = (
+            getattr(settings, "GROQ_API_KEY_NEW_FOR_TESTING", None)
+            or getattr(settings, "GROQ_API_KEY", None)
+        )
+        if active_key:
+            active_key = active_key.strip()
+        active_base = getattr(settings, "GROQ_API_BASE", None) or "https://api.groq.com/openai/v1"
+        configured_model = state.get("llm_model") or getattr(settings, "GROQ_MODEL", None) or "openai/gpt-oss-120b"
+        models_to_try = [configured_model]
+        for alt in ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
+            if alt not in models_to_try:
+                models_to_try.append(alt)
+    else:
+        active_key = getattr(settings, "XAI_API_KEY", None)
+        if active_key:
+            active_key = active_key.strip()
+        active_base = getattr(settings, "XAI_API_BASE", None) or "https://api.x.ai/v1"
+        configured_model = state.get("llm_model") or getattr(settings, "XAI_MODEL", None) or "grok-4.7"
+        models_to_try = [configured_model]
+
+    has_active_key = bool(active_key and not active_key.startswith("replace-") and active_key.strip())
+
+    provider_request_attempted = False
+    provider_response_received = False
+    llm_generation_succeeded = False
+    offline_fallback_used = False
+    token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    used_model = configured_model
+    model_name = configured_model
+    model_provider = f"Groq LLM ({configured_model})" if selected_provider == "groq" else f"xAI Grok ({configured_model})"
+
+    if has_active_key:
         try:
-            models_to_try = [settings.effective_llm_model]
-            if settings.is_groq:
-                for alt in ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
-                    if alt not in models_to_try:
-                        models_to_try.append(alt)
-
             last_err = None
             response = None
-            used_model = settings.effective_llm_model
 
             for test_model in models_to_try:
                 try:
-                    if settings.is_groq:
-                        from langchain_openai import ChatOpenAI
+                    if selected_provider == "groq":
+                        if ChatOpenAI is None:
+                            raise ImportError("langchain_openai is required for Groq provider")
                         llm = ChatOpenAI(
-                            api_key=settings.effective_llm_key,
-                            base_url=settings.effective_llm_base,
+                            api_key=active_key,
+                            base_url=active_base,
                             model=test_model,
-                            timeout=15,
+                            timeout=30,
                             temperature=0.1,
-                            max_tokens=900,
+                            max_tokens=2048,
                             max_retries=0,
                         )
                     else:
-                        from langchain_xai import ChatXAI
+                        if ChatXAI is None:
+                            raise ImportError("langchain_xai is required for xAI provider")
                         llm = ChatXAI(
-                            xai_api_key=settings.effective_llm_key,
-                            xai_api_base=settings.effective_llm_base,
+                            xai_api_key=active_key,
+                            xai_api_base=active_base,
                             model=test_model,
-                            timeout=15,
+                            timeout=30,
                             temperature=0.1,
-                            max_tokens=900,
+                            max_tokens=2048,
                             max_retries=0,
                         )
 
-                    lc_messages = [
-                        SystemMessage(content=messages[0]["content"]),
-                        HumanMessage(content=messages[1]["content"]),
-                    ]
+                    lc_messages = []
+                    for m in messages:
+                        if isinstance(m, dict):
+                            r = m.get("role", "user")
+                            c = m.get("content", "")
+                            if r == "system":
+                                lc_messages.append(SystemMessage(content=c))
+                            else:
+                                lc_messages.append(HumanMessage(content=c))
+                        elif isinstance(m, (SystemMessage, HumanMessage)):
+                            lc_messages.append(m)
+                        else:
+                            c = getattr(m, "content", str(m))
+                            lc_messages.append(HumanMessage(content=c))
+                    if not lc_messages:
+                        lc_messages = [HumanMessage(content=state.get("advisory_text") or "ITDR threat analysis")]
+
+                    provider_request_attempted = True
                     response = llm.invoke(lc_messages, config={"callbacks": [CallbackHandler()]})
                     content = (response.content or "").strip()
                     if not content and hasattr(response, "additional_kwargs"):
@@ -175,25 +253,37 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
                         logger.warning(f"Model {test_model} returned empty content; trying next candidate model...")
                         continue
 
+                    provider_response_received = True
                     raw_response = content
                     used_model = test_model
                     model_name = test_model
-                    model_provider = f"Groq LLM ({test_model})" if settings.is_groq else f"xAI Grok ({test_model})"
+                    model_provider = f"Groq LLM ({test_model})" if selected_provider == "groq" else f"xAI Grok ({test_model})"
+                    usage_dict = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage") or {}
+                    token_usage = {
+                        "input_tokens": int(usage_dict.get("input_tokens") or usage_dict.get("prompt_tokens") or 0),
+                        "output_tokens": int(usage_dict.get("output_tokens") or usage_dict.get("completion_tokens") or 0),
+                        "total_tokens": int(usage_dict.get("total_tokens") or 0),
+                    }
+                    if not token_usage["total_tokens"]:
+                        token_usage["total_tokens"] = token_usage["input_tokens"] + token_usage["output_tokens"]
                     break
                 except Exception as exc:
                     last_err = exc
                     exc_msg = str(exc).lower()
                     if any(term in exc_msg for term in ["model_not_found", "decommissioned", "does not exist", "404", "429", "rate_limit", "tokens"]):
-                        logger.warning(f"Model {test_model} unavailable or rate-limited ({exc}); falling back to next candidate model...")
+                        if any(term in exc_msg for term in ["429", "rate_limit", "tokens"]):
+                            logger.warning(f"Model {test_model} rate-limited ({exc}); waiting 4s before trying next candidate model...")
+                            time.sleep(4.0)
+                        else:
+                            logger.warning(f"Model {test_model} unavailable ({exc}); falling back to next candidate model...")
                         continue
                     raise
 
             if response is None or not raw_response:
-                raise last_err or RuntimeError("No compatible model returned content on provider API")
+                raise last_err or RuntimeError(f"No compatible model returned content on {selected_provider} API")
 
             # Parse JSON with json-repair for guaranteed structured object recovery
             from json_repair import repair_json
-            report_dict = None
             try:
                 parsed = repair_json(raw_response, return_objects=True)
                 if isinstance(parsed, dict):
@@ -218,18 +308,25 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
             if not isinstance(report_dict, dict):
                 raise ValueError("Could not parse valid JSON dictionary from LLM response")
 
+            llm_generation_succeeded = True
+            offline_fallback_used = False
+
         except Exception as e:
-            logger.warning(f"Grok LLM call failed or timed out ({e}); falling back to grounded synthesis.")
-            model_provider = "xAI Grok (Fallback Synthesis - API Error/Quota)"
-            raw_response = f"Grok API invocation encountered: {str(e)}"
-            report_dict = _synthesize_grounded_report(state, note=f"Generated via grounded synthesis due to Grok provider error: {str(e)}")
+            logger.warning(f"LLM call to {selected_provider} failed or timed out ({e}); falling back to grounded synthesis.")
+            offline_fallback_used = True
+            llm_generation_succeeded = False
+            model_provider = f"{'Groq' if selected_provider == 'groq' else 'xAI Grok'} (Fallback Synthesis - API Error/Quota)"
+            raw_response = f"{selected_provider.upper()} API invocation encountered: {str(e)}"
+            report_dict = _synthesize_grounded_report(state, note=f"Generated via grounded synthesis due to {selected_provider} provider error: {str(e)}")
     else:
         # Grounded synthesis without calling external paid API
+        offline_fallback_used = True
+        llm_generation_succeeded = False
         model_provider = "Grok Engine (Offline Grounded Synthesis)"
-        report_dict = _synthesize_grounded_report(state, note="Generated using authoritative retrieved context (xAI API key not configured in environment)")
+        report_dict = _synthesize_grounded_report(state, note="Generated using authoritative retrieved context (API key not configured in environment)")
         raw_response = json.dumps(report_dict, indent=2)
 
-    is_fallback = "Fallback Synthesis" in model_provider or "Offline Grounded Synthesis" in model_provider
+    is_fallback = offline_fallback_used
     if isinstance(report_dict, dict):
         report_dict["is_fallback_generation"] = is_fallback
         report_dict["model_provider"] = model_provider
@@ -243,8 +340,14 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
         "metadata": {
             "model_provider": model_provider,
             "model_name": model_name,
+            "selected_provider": selected_provider,
             "is_fallback_generation": is_fallback,
+            "provider_request_attempted": provider_request_attempted,
+            "provider_response_received": provider_response_received,
+            "llm_generation_succeeded": llm_generation_succeeded,
+            "offline_fallback_used": offline_fallback_used,
             "has_raw_response": bool(raw_response),
+            "token_usage": token_usage,
         },
         "error": None,
     }
@@ -256,9 +359,15 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
             metadata={
                 "model_provider": model_provider,
                 "model_name": model_name,
+                "selected_provider": selected_provider,
                 "is_fallback_generation": is_fallback,
+                "provider_request_attempted": provider_request_attempted,
+                "provider_response_received": provider_response_received,
+                "llm_generation_succeeded": llm_generation_succeeded,
+                "offline_fallback_used": offline_fallback_used,
                 "report_id": state.get("report_id"),
                 "duration_ms": round((time.perf_counter() - start) * 1000, 2),
+                "token_usage": token_usage,
             },
         )
     except Exception as e:
@@ -268,6 +377,13 @@ def generate_structured_report(state: ThreatAnalysisState) -> Dict[str, Any]:
         "raw_llm_response": raw_response,
         "structured_report": report_dict,
         "is_fallback_generation": is_fallback,
+        "token_usage": token_usage,
+        "provider_request_attempted": provider_request_attempted,
+        "provider_response_received": provider_response_received,
+        "llm_generation_succeeded": llm_generation_succeeded,
+        "offline_fallback_used": offline_fallback_used,
+        "llm_provider": selected_provider,
+        "llm_model": model_name,
         "trace_steps": state["trace_steps"] + [trace_step],
     }
 
@@ -499,7 +615,7 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
         valid_source_map: Dict[str, Dict[str, Any]] = {}
         for cand in state.get("candidate_techniques", []):
             cand_src = f"att-tech-{cand['technique_id']}"
-            valid_source_map[cand_src] = {
+            cand_entry = {
                 "source_id": cand_src,
                 "external_id": cand["technique_id"],
                 "source_url": cand.get("url") or f"https://attack.mitre.org/techniques/{cand['technique_id']}",
@@ -507,8 +623,11 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
                 "relevance_score": float(cand.get("similarity_score", 1.0)),
                 "citation_role": "Technique Evidence",
             }
+            valid_source_map[cand_src] = cand_entry
+            valid_source_map[cand["technique_id"]] = cand_entry
+
             for snip in cand.get("evidence_snippets", []):
-                if snip.get("source_id"):
+                if isinstance(snip, dict) and snip.get("source_id"):
                     valid_source_map[snip["source_id"]] = {
                         "source_id": snip["source_id"],
                         "external_id": cand["technique_id"],
@@ -517,16 +636,45 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
                         "relevance_score": float(snip.get("score", 1.0)),
                         "citation_role": "Technique Evidence",
                     }
+            for proc in (cand.get("procedure_evidence") or cand.get("procedures") or []):
+                if isinstance(proc, dict) and proc.get("source_id"):
+                    valid_source_map[proc["source_id"]] = {
+                        "source_id": proc["source_id"],
+                        "external_id": cand["technique_id"],
+                        "source_url": cand.get("url"),
+                        "excerpt": (proc.get("usage") or proc.get("description") or proc.get("excerpt") or "")[:500],
+                        "relevance_score": 1.0,
+                        "citation_role": "Procedure Evidence",
+                    }
+            for feed in (cand.get("threat_feed_content") or cand.get("cti_feeds") or []):
+                if isinstance(feed, dict) and feed.get("source_id"):
+                    valid_source_map[feed["source_id"]] = {
+                        "source_id": feed["source_id"],
+                        "external_id": cand["technique_id"],
+                        "source_url": cand.get("url"),
+                        "excerpt": (feed.get("content") or feed.get("summary") or "")[:500],
+                        "relevance_score": 1.0,
+                        "citation_role": "Threat Feed Evidence",
+                    }
         for d3f in state.get("d3fend_countermeasures", []):
-            d3f_src = f"d3f-tech-{d3f['d3fend_id']}"
-            valid_source_map[d3f_src] = {
+            did = d3f["d3fend_id"]
+            d3f_src = f"d3f-tech-{did}"
+            d3f_entry = {
                 "source_id": d3f_src,
-                "external_id": d3f["d3fend_id"],
-                "source_url": d3f.get("url") or f"https://d3fend.mitre.org/technique/{d3f['d3fend_id']}",
+                "external_id": did,
+                "source_url": d3f.get("url") or f"https://d3fend.mitre.org/technique/{did}",
                 "excerpt": f"D3FEND Countermeasure: {d3f['name']} - {(d3f.get('definition') or d3f.get('rationale') or '')[:250]}",
                 "relevance_score": 1.0,
                 "citation_role": "Countermeasure Evidence",
             }
+            valid_source_map[d3f_src] = d3f_entry
+            valid_source_map[did] = d3f_entry
+            valid_source_map[f"d3fend-{did}"] = d3f_entry
+            valid_source_map[f"d3f-{did}"] = d3f_entry
+            valid_source_map[d3f_src.lower()] = d3f_entry
+            valid_source_map[did.lower()] = d3f_entry
+            valid_source_map[f"d3fend-{did.lower()}"] = d3f_entry
+            valid_source_map[f"d3f-{did.lower()}"] = d3f_entry
 
         # Audit citations: filter out any fabricated citation IDs and resolve authentic metadata
         citations = []
@@ -534,12 +682,19 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
         rejected_citations = []
         raw_citations = final_report.get("citations", [])
         for cit in raw_citations:
-            s_id = cit.get("source_id")
-            if s_id and s_id in valid_source_map:
+            s_id = str(cit.get("source_id") or "").strip()
+            auth_rec = (
+                valid_source_map.get(s_id)
+                or valid_source_map.get(s_id.lower())
+                or valid_source_map.get(s_id.upper())
+                or valid_source_map.get(s_id.replace("d3fend-", "d3f-tech-"))
+                or valid_source_map.get(s_id.replace("attack-", "att-tech-"))
+                or valid_source_map.get(s_id.replace("att-", "att-tech-"))
+            )
+            if auth_rec:
                 # Resolve source URLs, titles and excerpts using authentic backend records
-                auth_rec = valid_source_map[s_id]
                 citations.append({
-                    "source_id": s_id,
+                    "source_id": auth_rec["source_id"],
                     "external_id": auth_rec["external_id"],
                     "source_url": auth_rec["source_url"],
                     "excerpt": auth_rec["excerpt"],
@@ -613,12 +768,23 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
             else:
                 def_t["is_supported"] = True
 
+        is_fallback = report_dict.get("is_fallback_generation", False)
+        is_schema_repaired = False
+        if unsupported_attack_ids or unsupported_d3fend_ids:
+            validation_status = "UNSUPPORTED_TAXONOMY_DETECTED"
+        elif is_fallback:
+            validation_status = "FALLBACK_SYNTHESIZED"
+        else:
+            validation_status = "VALIDATED"
+
+        final_report["validation_status"] = validation_status
+        final_report["is_schema_repaired"] = False
         final_report["unsupported_attack_ids"] = unsupported_attack_ids
         final_report["unsupported_d3fend_ids"] = unsupported_d3fend_ids
         final_report["invalid_citations_count"] = invalid_citations_count
         final_report["model_provider"] = report_dict.get("model_provider")
         final_report["model_name"] = report_dict.get("model_name")
-        final_report["is_fallback_generation"] = report_dict.get("is_fallback_generation", False)
+        final_report["is_fallback_generation"] = is_fallback
 
     except Exception as e:
         logger.warning(f"Schema validation error: {e}. Repairing report structure...")
@@ -628,6 +794,13 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
         unsupported_d3fend_ids = []
         invalid_citations_count = 0
         rejected_citations = []
+        is_schema_repaired = True
+        is_fallback = True
+        validation_status = "SCHEMA_REPAIRED"
+        final_report["validation_status"] = "SCHEMA_REPAIRED"
+        final_report["is_schema_repaired"] = True
+        final_report["is_fallback_generation"] = True
+        final_report["schema_validation_error"] = str(e)
 
     trace_step = {
         "step_name": "validate_report_and_citations",
@@ -635,6 +808,9 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
         "status": "SUCCESS",
         "duration_ms": round((time.perf_counter() - start) * 1000, 2),
         "metadata": {
+            "validation_status": validation_status,
+            "is_schema_repaired": is_schema_repaired,
+            "is_fallback_generation": is_fallback,
             "validated_citations_count": len(citations),
             "invalid_citations_count": invalid_citations_count,
             "rejected_citations": rejected_citations,
@@ -650,7 +826,9 @@ def validate_report_and_citations(state: ThreatAnalysisState) -> Dict[str, Any]:
     return {
         "structured_report": final_report,
         "citations": citations,
-        "is_fallback_generation": final_report.get("is_fallback_generation", False),
+        "is_fallback_generation": is_fallback,
+        "is_schema_repaired": is_schema_repaired,
+        "validation_status": validation_status,
         "unsupported_attack_ids": unsupported_attack_ids,
         "unsupported_d3fend_ids": unsupported_d3fend_ids,
         "invalid_citations_count": invalid_citations_count,
@@ -758,7 +936,7 @@ def _synthesize_grounded_report(state: ThreatAnalysisState, note: str = "") -> D
             "source_id": source_id,
             "external_id": tid,
             "source_url": c.get("url"),
-            "excerpt": f"{c['name']}: {c['description'][:220]}...",
+            "excerpt": f"{c['name']}: {(c.get('description') or '')[:220]}...",
             "relevance_score": c.get("similarity_score", 0.8),
             "citation_role": "Technique Evidence",
         })
