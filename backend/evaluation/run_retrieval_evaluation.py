@@ -143,20 +143,45 @@ def verify_retrieval_acceptance(
     # 5. Negative Query False Positive Rate
     neg = metrics.get("negative_queries") or {}
     neg_count = metrics.get("negative_cases_count", neg.get("count", 0))
-    if neg_count > 0:
-        neg_fpr = neg.get("false_positive_rate")
-        if neg_fpr is None:
-            failures.append("Negative Query False Positive Rate is missing (N/A).")
-            checks["negative_fpr"] = {"actual": None, "threshold": th["max_negative_fpr"], "passed": False}
-        elif neg_fpr > th["max_negative_fpr"]:
-            failures.append(
-                f"Negative Query False Positive Rate ({neg_fpr * 100:.1f}%) exceeded maximum allowed threshold ({th['max_negative_fpr'] * 100:.1f}%)."
-            )
-            checks["negative_fpr"] = {"actual": neg_fpr, "threshold": th["max_negative_fpr"], "passed": False}
-        else:
-            checks["negative_fpr"] = {"actual": neg_fpr, "threshold": th["max_negative_fpr"], "passed": True}
+    succ_neg = neg.get("successful_negative_queries", neg_count - neg.get("error_count", 0))
+    neg_fpr = neg.get("false_positive_rate")
+
+    if neg_count == 0:
+        failures.append(
+            "No negative test cases evaluated; negative-query metrics and coverage are missing (N/A)."
+        )
+        checks["negative_fpr"] = {
+            "actual": None,
+            "threshold": th["max_negative_fpr"],
+            "passed": False,
+            "failure_reason": "Missing negative-query test coverage",
+        }
+    elif succ_neg == 0 or neg_fpr is None:
+        failures.append(
+            "All negative queries failed with retrieval errors; no successful negative queries available to calculate False Positive Rate (N/A)."
+        )
+        checks["negative_fpr"] = {
+            "actual": None,
+            "threshold": th["max_negative_fpr"],
+            "passed": False,
+            "failure_reason": "Zero successful negative queries (all failed with retrieval errors)",
+        }
+    elif neg_fpr > th["max_negative_fpr"]:
+        failures.append(
+            f"Negative Query False Positive Rate ({neg_fpr * 100:.1f}%) exceeded maximum allowed threshold ({th['max_negative_fpr'] * 100:.1f}%)."
+        )
+        checks["negative_fpr"] = {
+            "actual": neg_fpr,
+            "threshold": th["max_negative_fpr"],
+            "passed": False,
+            "failure_reason": f"FPR ({neg_fpr * 100:.1f}%) > threshold ({th['max_negative_fpr'] * 100:.1f}%)",
+        }
     else:
-        checks["negative_fpr"] = {"actual": None, "threshold": th["max_negative_fpr"], "passed": True, "note": "No negative queries"}
+        checks["negative_fpr"] = {
+            "actual": neg_fpr,
+            "threshold": th["max_negative_fpr"],
+            "passed": True,
+        }
 
     # 6. Overall Error Rate
     err_rate = metrics.get("overall_error_rate")

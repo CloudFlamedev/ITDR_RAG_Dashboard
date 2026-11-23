@@ -1654,12 +1654,20 @@ def test_separate_positive_and_negative_query_evaluation():
     # Negative query metrics
     neg_metrics = agg["negative_queries"]
     assert neg_metrics["count"] == 3
+    assert neg_metrics["successful_negative_queries"] == 2
+    assert neg_metrics["failed_negative_queries"] == 1
     assert neg_metrics["correct_empty_count"] == 1
-    assert neg_metrics["correct_empty_retrieval_rate"] == round(1 / 3, 4)
+    assert neg_metrics["correct_empty_numerator"] == 1
+    assert neg_metrics["correct_empty_denominator"] == 2
+    assert neg_metrics["correct_empty_retrieval_rate"] == 0.50  # 1 / 2 successful queries
     assert neg_metrics["false_positive_count"] == 1
-    assert neg_metrics["false_positive_rate"] == round(1 / 3, 4)
+    assert neg_metrics["false_positive_numerator"] == 1
+    assert neg_metrics["false_positive_denominator"] == 2
+    assert neg_metrics["false_positive_rate"] == 0.50  # 1 / 2 successful queries
     assert neg_metrics["error_count"] == 1
-    assert neg_metrics["error_rate"] == round(1 / 3, 4)
+    assert neg_metrics["error_numerator"] == 1
+    assert neg_metrics["error_denominator"] == 3
+    assert neg_metrics["error_rate"] == round(1 / 3, 4)  # 1 / 3 total queries
 
 
 def test_retrieval_acceptance_criteria_verification():
@@ -1688,6 +1696,8 @@ def test_retrieval_acceptance_criteria_verification():
         },
         "negative_queries": {
             "count": 2,
+            "successful_negative_queries": 2,
+            "failed_negative_queries": 0,
             "false_positive_rate": 0.0,
             "correct_empty_retrieval_rate": 1.0,
             "error_rate": 0.0,
@@ -1737,6 +1747,18 @@ def test_retrieval_acceptance_criteria_verification():
     assert success is False
     assert any("ATT&CK Recall" in f and "missing" in f for f in failures)
 
+    # 4b. Missing/N/A negative FPR metric must NOT pass
+    missing_neg_fpr = {
+        **passing_metrics,
+        "negative_queries": {
+            **passing_metrics["negative_queries"],
+            "false_positive_rate": None,
+        },
+    }
+    success, failures, _ = verify_retrieval_acceptance(missing_neg_fpr)
+    assert success is False
+    assert any("False Positive Rate" in f for f in failures)
+
     # 5. Configurable thresholds
     custom_thresholds = {
         "min_attack_recall": 0.95,  # Higher than actual 0.90
@@ -1744,4 +1766,173 @@ def test_retrieval_acceptance_criteria_verification():
     success, failures, checks = verify_retrieval_acceptance(passing_metrics, thresholds=custom_thresholds)
     assert success is False
     assert any("fell below required threshold (95.0%)" in f for f in failures)
+
+
+def test_negative_query_fpr_and_acceptance_scenarios():
+    """
+    Focused unit tests covering the 5 negative-query evaluation requirements:
+    1. Two successful negative queries (1 false positive, 1 correct empty retrieval):
+       FPR = 50%, Correct Empty Retrieval Rate = 50%, Error Rate = 0%.
+    2. Two negative queries (1 false positive, 1 retrieval error):
+       FPR = 100% (1/1), Correct Empty Retrieval Rate = 0% (0/1), Error Rate = 50% (1/2).
+    3. All negative queries fail:
+       FPR = N/A (None), Correct Empty Retrieval Rate = N/A (None), Acceptance must fail.
+    4. No negative queries:
+       Negative metrics must NOT default to 0% (must be None/N/A), Acceptance must fail with clear missing coverage message.
+    5. Default FPR threshold (0.00) rejects 100% false positive rate; relaxed threshold allows passing when genuine.
+    """
+    from evaluation.retrieval_metrics import evaluate_case_retrieval, aggregate_retrieval_metrics
+    from evaluation.run_retrieval_evaluation import verify_retrieval_acceptance, DEFAULT_RETRIEVAL_THRESHOLDS
+
+    # Baseline passing positive query so positive checks pass when testing negative acceptance
+    base_pos = {
+        "sample_id": "pos-001",
+        "query_type": "explicit_id",
+        "is_negative": False,
+        "attack_recall_at_k": 1.0,
+        "attack_precision_at_k": 0.2,
+        "attack_hit_rate_at_k": 1.0,
+        "attack_mrr": 1.0,
+        "d3fend_recall_at_k": 1.0,
+        "d3fend_precision_at_k": 0.2,
+        "d3fend_hit_rate_at_k": 1.0,
+        "d3fend_mrr": 1.0,
+        "duration_ms": 100.0,
+        "is_empty_retrieval": False,
+        "has_error": False,
+    }
+
+    # Scenario 1: Two successful negative queries (1 FP, 1 Correct Empty)
+    n_fp = evaluate_case_retrieval(
+        retrieved_attack_ids=["T1078"],
+        expected_attack_ids=[],
+        retrieved_d3fend_ids=[],
+        expected_d3fend_ids=[],
+        k=5,
+        duration_ms=50.0,
+    )
+    n_ce = evaluate_case_retrieval(
+        retrieved_attack_ids=[],
+        expected_attack_ids=[],
+        retrieved_d3fend_ids=[],
+        expected_d3fend_ids=[],
+        k=5,
+        duration_ms=40.0,
+    )
+    cases_s1 = [
+        base_pos,
+        {**n_fp, "sample_id": "neg-001", "query_type": "negative"},
+        {**n_ce, "sample_id": "neg-002", "query_type": "negative"},
+    ]
+    agg_s1 = aggregate_retrieval_metrics(cases_s1)
+    neg_s1 = agg_s1["negative_queries"]
+    assert neg_s1["count"] == 2
+    assert neg_s1["successful_negative_queries"] == 2
+    assert neg_s1["failed_negative_queries"] == 0
+    assert neg_s1["false_positive_count"] == 1
+    assert neg_s1["false_positive_numerator"] == 1
+    assert neg_s1["false_positive_denominator"] == 2
+    assert neg_s1["false_positive_rate"] == 0.50  # 50%
+    assert neg_s1["correct_empty_count"] == 1
+    assert neg_s1["correct_empty_numerator"] == 1
+    assert neg_s1["correct_empty_denominator"] == 2
+    assert neg_s1["correct_empty_retrieval_rate"] == 0.50  # 50%
+    assert neg_s1["error_count"] == 0
+    assert neg_s1["error_numerator"] == 0
+    assert neg_s1["error_denominator"] == 2
+    assert neg_s1["error_rate"] == 0.0  # 0%
+
+    # Scenario 2: Two negative queries (1 FP, 1 Retrieval Error)
+    n_err = evaluate_case_retrieval(
+        retrieved_attack_ids=[],
+        expected_attack_ids=[],
+        retrieved_d3fend_ids=[],
+        expected_d3fend_ids=[],
+        k=5,
+        duration_ms=30.0,
+        error="Connection reset by peer",
+    )
+    cases_s2 = [
+        base_pos,
+        {**n_fp, "sample_id": "neg-001", "query_type": "negative"},
+        {**n_err, "sample_id": "neg-002", "query_type": "negative"},
+    ]
+    agg_s2 = aggregate_retrieval_metrics(cases_s2)
+    neg_s2 = agg_s2["negative_queries"]
+    assert neg_s2["count"] == 2
+    assert neg_s2["successful_negative_queries"] == 1
+    assert neg_s2["failed_negative_queries"] == 1
+    # FPR denominator must be successful queries (1), NOT total (2)
+    assert neg_s2["false_positive_count"] == 1
+    assert neg_s2["false_positive_numerator"] == 1
+    assert neg_s2["false_positive_denominator"] == 1
+    assert neg_s2["false_positive_rate"] == 1.0  # 1/1 = 100%
+    assert neg_s2["correct_empty_count"] == 0
+    assert neg_s2["correct_empty_numerator"] == 0
+    assert neg_s2["correct_empty_denominator"] == 1
+    assert neg_s2["correct_empty_retrieval_rate"] == 0.0  # 0/1 = 0%
+    assert neg_s2["error_count"] == 1
+    assert neg_s2["error_numerator"] == 1
+    assert neg_s2["error_denominator"] == 2
+    assert neg_s2["error_rate"] == 0.50  # 1/2 = 50%
+
+    # Scenario 3: All negative queries fail
+    n_err2 = evaluate_case_retrieval(
+        retrieved_attack_ids=[],
+        expected_attack_ids=[],
+        retrieved_d3fend_ids=[],
+        expected_d3fend_ids=[],
+        k=5,
+        duration_ms=35.0,
+        error="Timeout",
+    )
+    cases_s3 = [
+        base_pos,
+        {**n_err, "sample_id": "neg-001", "query_type": "negative"},
+        {**n_err2, "sample_id": "neg-002", "query_type": "negative"},
+    ]
+    agg_s3 = aggregate_retrieval_metrics(cases_s3)
+    neg_s3 = agg_s3["negative_queries"]
+    assert neg_s3["count"] == 2
+    assert neg_s3["successful_negative_queries"] == 0
+    assert neg_s3["failed_negative_queries"] == 2
+    assert neg_s3["false_positive_rate"] is None  # Reported as N/A, not 0%
+    assert neg_s3["correct_empty_retrieval_rate"] is None  # Reported as N/A, not 0%
+    assert neg_s3["error_rate"] == 1.0
+    # Acceptance must fail closed
+    success_s3, failures_s3, checks_s3 = verify_retrieval_acceptance(agg_s3)
+    assert success_s3 is False
+    assert any("All negative queries failed with retrieval errors" in f for f in failures_s3)
+    # Relaxed max_negative_fpr must NOT hide the failure
+    success_s3_relaxed, _, _ = verify_retrieval_acceptance(agg_s3, thresholds={"max_negative_fpr": 1.0})
+    assert success_s3_relaxed is False
+
+    # Scenario 4: No negative queries
+    cases_s4 = [base_pos]
+    agg_s4 = aggregate_retrieval_metrics(cases_s4)
+    neg_s4 = agg_s4["negative_queries"]
+    assert neg_s4["count"] == 0
+    assert neg_s4["false_positive_rate"] is None  # Must NOT default to 0%
+    assert neg_s4["correct_empty_retrieval_rate"] is None  # Must NOT default to 0%
+    assert neg_s4["error_rate"] is None
+    # Acceptance must fail closed with missing-coverage message
+    success_s4, failures_s4, checks_s4 = verify_retrieval_acceptance(agg_s4)
+    assert success_s4 is False
+    assert any("No negative test cases evaluated" in f and "missing" in f for f in failures_s4)
+    # Relaxed threshold must NOT bypass missing coverage
+    success_s4_relaxed, _, _ = verify_retrieval_acceptance(agg_s4, thresholds={"max_negative_fpr": 1.0})
+    assert success_s4_relaxed is False
+
+    # Scenario 5: Verify default threshold rejects 100% false positive rate
+    # Using agg_s2 (which has FPR = 100%)
+    success_s5_default, failures_s5, checks_s5 = verify_retrieval_acceptance(agg_s2)
+    assert success_s5_default is False
+    assert any("Negative Query False Positive Rate (100.0%) exceeded maximum allowed threshold (0.0%)" in f for f in failures_s5)
+    # And when explicitly allowing max_negative_fpr = 1.0, with error_rate threshold relaxed:
+    success_s5_custom, _, checks_s5_custom = verify_retrieval_acceptance(
+        agg_s2,
+        thresholds={"max_negative_fpr": 1.0, "max_error_rate": 0.50},
+    )
+    assert success_s5_custom is True
+    assert checks_s5_custom["negative_fpr"]["passed"] is True
 

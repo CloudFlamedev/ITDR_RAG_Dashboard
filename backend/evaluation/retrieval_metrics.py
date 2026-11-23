@@ -308,44 +308,86 @@ def aggregate_retrieval_metrics(
         }
 
     def _compute_negative_group_summary(cases: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if not cases:
+        total_neg = len(cases)
+        if total_neg == 0:
             return {
                 "count": 0,
+                "total_negative_queries": 0,
+                "failed_negative_queries": 0,
+                "successful_negative_queries": 0,
                 "false_positive_count": 0,
-                "false_positive_rate": 0.0,
+                "false_positive_numerator": 0,
+                "false_positive_denominator": 0,
+                "false_positive_rate": None,
                 "correct_empty_count": 0,
-                "correct_empty_retrieval_rate": 0.0,
+                "correct_empty_numerator": 0,
+                "correct_empty_denominator": 0,
+                "correct_empty_retrieval_rate": None,
                 "error_count": 0,
-                "error_rate": 0.0,
+                "error_numerator": 0,
+                "error_denominator": 0,
+                "error_rate": None,
                 "mean_latency_ms": 0.0,
                 "p95_latency_ms": 0.0,
             }
-        n = len(cases)
+
         err_count = sum(1 for c in cases if c.get("has_error", False))
+        successful_neg = total_neg - err_count
+
         fp_count = sum(
             1 for c in cases
             if not c.get("has_error", False) and (
-                len(c.get("retrieved_attack_ids", [])) > 0
-                or len(c.get("retrieved_d3fend_ids", [])) > 0
-                or not c.get("is_empty_retrieval", True)
+                c.get("is_false_positive") is True
+                or (
+                    c.get("is_false_positive") is None
+                    and (
+                        len(c.get("retrieved_attack_ids", [])) > 0
+                        or len(c.get("retrieved_d3fend_ids", [])) > 0
+                        or not c.get("is_empty_retrieval", True)
+                    )
+                )
             )
         )
         correct_empty = sum(
             1 for c in cases
-            if not c.get("has_error", False) and c.get("is_empty_retrieval", False)
+            if not c.get("has_error", False) and (
+                c.get("is_correct_empty") is True
+                or (
+                    c.get("is_correct_empty") is None
+                    and (
+                        len(c.get("retrieved_attack_ids", [])) == 0
+                        and len(c.get("retrieved_d3fend_ids", [])) == 0
+                        and c.get("is_empty_retrieval", False)
+                    )
+                )
+            )
         )
+
+        fpr = round(fp_count / successful_neg, 4) if successful_neg > 0 else None
+        cer_rate = round(correct_empty / successful_neg, 4) if successful_neg > 0 else None
+        err_rate = round(err_count / total_neg, 4) if total_neg > 0 else None
+
         latencies = sorted([float(c.get("duration_ms", 0.0)) for c in cases])
         p95_idx = max(0, int(len(latencies) * 0.95) - 1)
         p95_lat = latencies[p95_idx] if latencies else 0.0
 
         return {
-            "count": n,
+            "count": total_neg,
+            "total_negative_queries": total_neg,
+            "failed_negative_queries": err_count,
+            "successful_negative_queries": successful_neg,
             "false_positive_count": fp_count,
-            "false_positive_rate": round(fp_count / n, 4),
+            "false_positive_numerator": fp_count,
+            "false_positive_denominator": successful_neg,
+            "false_positive_rate": fpr,
             "correct_empty_count": correct_empty,
-            "correct_empty_retrieval_rate": round(correct_empty / n, 4),
+            "correct_empty_numerator": correct_empty,
+            "correct_empty_denominator": successful_neg,
+            "correct_empty_retrieval_rate": cer_rate,
             "error_count": err_count,
-            "error_rate": round(err_count / n, 4),
+            "error_numerator": err_count,
+            "error_denominator": total_neg,
+            "error_rate": err_rate,
             "mean_latency_ms": round(sum(latencies) / max(len(latencies), 1), 2),
             "p95_latency_ms": round(p95_lat, 2),
         }
@@ -445,14 +487,35 @@ def print_retrieval_summary_table(
     print(f" D3FEND Precision@{k}             : {pos.get('mean_d3fend_precision_at_k', 0.0) * 100:.1f}%")
     print(f" D3FEND Hit Rate@{k}              : {pos.get('mean_d3fend_hit_rate_at_k', 0.0) * 100:.1f}%")
     print(f" D3FEND MRR                       : {pos.get('mean_d3fend_mrr', 0.0):.4f}")
-    if neg_count > 0:
-        print(sub_bar)
-        print(" 2. NEGATIVE QUERY RETRIEVAL PERFORMANCE (Hallucination Suppression)")
-        print(sub_bar)
-        print(f" Negative Query Count             : {neg_count}")
-        print(f" Correct Empty Retrieval Rate     : {neg.get('correct_empty_retrieval_rate', 0.0) * 100:.1f}% ({neg.get('correct_empty_count', 0)}/{neg_count}) [Desired: 100%]")
-        print(f" False Positive Rate (FPR)        : {neg.get('false_positive_rate', 0.0) * 100:.1f}% ({neg.get('false_positive_count', 0)}/{neg_count}) [Must be 0.0%]")
-        print(f" Negative Retrieval Error Rate    : {neg.get('error_rate', 0.0) * 100:.1f}% ({neg.get('error_count', 0)}/{neg_count})")
+    print(sub_bar)
+    print(" 2. NEGATIVE QUERY RETRIEVAL PERFORMANCE (Hallucination Suppression)")
+    print(sub_bar)
+    print(f" Negative Query Count             : {neg_count}")
+    if neg_count == 0:
+        print("  [WARNING] No negative test cases evaluated; negative-query metrics are missing (N/A).")
+    else:
+        succ_count = neg.get("successful_negative_queries", neg_count - neg.get("error_count", 0))
+        err_count = neg.get("error_count", 0)
+
+        cer_rate = neg.get("correct_empty_retrieval_rate")
+        cer_str = f"{cer_rate * 100:.1f}%" if cer_rate is not None else "N/A"
+        cer_num = neg.get("correct_empty_numerator", neg.get("correct_empty_count", 0))
+        cer_den = neg.get("correct_empty_denominator", succ_count)
+
+        fpr_rate = neg.get("false_positive_rate")
+        fpr_str = f"{fpr_rate * 100:.1f}%" if fpr_rate is not None else "N/A"
+        fp_num = neg.get("false_positive_numerator", neg.get("false_positive_count", 0))
+        fp_den = neg.get("false_positive_denominator", succ_count)
+
+        err_rate = neg.get("error_rate")
+        err_str = f"{err_rate * 100:.1f}%" if err_rate is not None else "N/A"
+        err_num = neg.get("error_numerator", err_count)
+        err_den = neg.get("error_denominator", neg_count)
+
+        print(f" Successful Negative Queries      : {succ_count}/{neg_count}")
+        print(f" Correct Empty Retrieval Rate     : {cer_str} ({cer_num}/{cer_den}) [Desired: 100%]")
+        print(f" False Positive Rate (FPR)        : {fpr_str} ({fp_num}/{fp_den}) [Must be 0.0%]")
+        print(f" Negative Retrieval Error Rate    : {err_str} ({err_num}/{err_den})")
     print(sub_bar)
     print(" 3. QUERY CATEGORY SEGMENTATION")
     print(sub_bar)
